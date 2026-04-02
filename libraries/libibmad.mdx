@@ -1,0 +1,243 @@
+---
+title: "libibmad"
+description: "InfiniBand Management Datagram library"
+---
+
+libibmad is a higher-level MAD library built on top of libibumad. It provides MAD field encoding and decoding, RPC abstractions for common management operations, and high-level interfaces for querying subnet managers, performance counters, and SA (Subnet Administration) records. The `infiniband-diags` tools are the primary consumers of libibmad.
+
+## Architecture
+
+```
+infiniband-diags tools
+        │
+   libibmad          ← field parsing, RPC, SA, SMP, GSI
+        │
+   libibumad         ← raw MAD send/recv via /dev/infiniband/umadX
+        │
+   kernel ib_umad
+```
+
+libibmad adds:
+- Structured field access through the `MAD_FIELDS` enum
+- Automatic MAD encoding/decoding (byte-swapping, bit-field extraction)
+- Synchronous RPC wrappers for SMP, GSI, and SA operations
+- SA path record and node record queries
+- Performance counter queries via the General Services Interface
+
+## Opening a port
+
+The preferred interface uses `mad_rpc_open_port` or `mad_rpc_open_port2`:
+
+```c
+#include <infiniband/mad.h>
+
+/* Management classes to register */
+int mgmt_classes[] = {
+    IB_SMI_CLASS,
+    IB_SMI_DIRECT_CLASS,
+    IB_SA_CLASS,
+    IB_PERFORMANCE_CLASS,
+};
+
+struct ibmad_port *srcport;
+
+srcport = mad_rpc_open_port("mlx5_0", 1,
+                             mgmt_classes,
+                             ARRAY_SIZE(mgmt_classes));
+if (!srcport) {
+    fprintf(stderr, "failed to open MAD port\n");
+    return 1;
+}
+```
+
+`mad_rpc_open_port2` opens both SMI and GSI ports simultaneously, which is required for tools that need to send both directed-route SMPs and GSI MADs from the same process.
+
+When done:
+
+```c
+mad_rpc_close_port(srcport);
+```
+
+## MAD field access
+
+libibmad defines every field in the InfiniBand MAD formats through the `MAD_FIELDS` enum (`mad.h`). Use the field accessors to read and write values without manual bit arithmetic:
+
+```c
+uint8_t mad_buf[IB_MAD_SIZE] = {0};
+uint32_t val;
+
+/* Read a field from a raw MAD buffer */
+val = mad_get_field(mad_buf, 0, IB_MAD_METHOD_F);
+
+/* Write a field into a MAD buffer */
+mad_set_field(mad_buf, 0, IB_MAD_MGMTCLASS_F, IB_PERFORMANCE_CLASS);
+
+/* 64-bit field access */
+uint64_t trid = mad_get_field64(mad_buf, 0, IB_MAD_TRID_F);
+
+/* Array field (e.g., GID, node description) */
+uint8_t gid[16];
+mad_get_array(mad_buf, 0, IB_GID_GUID_F, gid);
+```
+
+Field names follow a consistent convention: `IB_<STRUCT>_<FIELD>_F`. For example, performance counter fields are `IB_PC_*_F`, port info fields are `IB_PORT_*_F`, and node info fields are `IB_NODE_*_F`.
+
+## SMP queries
+
+Use `smp_query_via` and `smp_set_via` to send Subnet Management Packets:
+
+```c
+#include <infiniband/mad.h>
+
+uint8_t rcvbuf[IB_MAD_SIZE];
+ib_portid_t portid;
+
+/* Target port by LID */
+ib_portid_set(&portid, 5 /* LID */, 0, 0);
+
+/* Query NodeInfo attribute (0x11) */
+uint8_t *p = smp_query_via(rcvbuf, &portid,
+                            IB_ATTR_NODE_INFO, 0,
+                            1000 /* timeout ms */,
+                            srcport);
+if (!p) {
+    fprintf(stderr, "SMP query failed\n");
+} else {
+    uint32_t vendor_id = mad_get_field(p, 0, IB_NODE_VENDORID_F);
+    uint32_t dev_id    = mad_get_field(p, 0, IB_NODE_DEVID_F);
+    printf("Vendor ID: 0x%x, Device ID: 0x%x\n", vendor_id, dev_id);
+}
+```
+
+For directed-route SMPs (used when LIDs are not yet assigned):
+
+```c
+ib_portid_t drpath;
+memset(&drpath, 0, sizeof(drpath));
+/* Build directed route: local port 1 → switch port 3 */
+str2drpath(&drpath.drpath, "1,3", 0, 0);
+
+smp_query_via(rcvbuf, &drpath, IB_ATTR_PORT_INFO, 1, 1000, srcport);
+```
+
+## Performance counter queries
+
+Use `pma_query_via` to read port performance counters over the GSI:
+
+```c
+uint8_t rcvbuf[IB_MAD_SIZE];
+ib_portid_t portid;
+
+ib_portid_set(&portid, 5 /* LID */, 0, 0);
+
+uint8_t *p = pma_query_via(rcvbuf, &portid,
+                            1 /* port number */,
+                            1000 /* timeout ms */,
+                            IB_GSI_PORT_COUNTERS,
+                            srcport);
+if (p) {
+    uint64_t xmt_bytes = mad_get_field(p, 0, IB_PC_XMT_BYTES_F);
+    uint64_t rcv_bytes = mad_get_field(p, 0, IB_PC_RCV_BYTES_F);
+    uint32_t xmt_pkts  = mad_get_field(p, 0, IB_PC_XMT_PKTS_F);
+    uint32_t rcv_pkts  = mad_get_field(p, 0, IB_PC_RCV_PKTS_F);
+
+    printf("Xmt bytes: %lu  Rcv bytes: %lu\n", xmt_bytes, rcv_bytes);
+    printf("Xmt pkts:  %u   Rcv pkts:  %u\n",  xmt_pkts,  rcv_pkts);
+}
+
+/* Reset counters */
+performance_reset_via(rcvbuf, &portid, 1, 0xffff, 1000,
+                      IB_GSI_PORT_COUNTERS, srcport);
+```
+
+Extended counters (`IB_GSI_PORT_COUNTERS_EXT`) expose 64-bit byte and packet counts for fabrics where the standard 32-bit counters wrap frequently.
+
+## SA queries
+
+Use `sa_rpc_call` to query the Subnet Administrator for path records, node records, and multicast member records:
+
+```c
+uint8_t rcvbuf[IB_MAD_SIZE];
+ib_portid_t sm_portid;
+ib_sa_call_t sa;
+
+/* Resolve the SM's LID */
+ib_resolve_smlid_via(&sm_portid, 1000, srcport);
+
+memset(&sa, 0, sizeof(sa));
+sa.attrid = IB_SA_ATTR_NODERECORD;
+sa.method = IB_MAD_METHOD_GET_TABLE;
+sa.mask   = 0; /* request all fields */
+sa.recsz  = IB_SA_NR_RECSZ;
+
+uint8_t *p = sa_rpc_call(srcport, rcvbuf, &sm_portid, &sa, 1000);
+if (p) {
+    /* Parse node records from the response */
+    uint32_t lid = mad_get_field(p, 0, IB_SA_NR_LID_F);
+    printf("Node LID: %u\n", lid);
+}
+```
+
+For path records between two GIDs:
+
+```c
+ibmad_gid_t sgid, dgid;
+
+/* Fill sgid and dgid from port attributes */
+ib_path_query_via(srcport, sgid, dgid, &sm_portid, rcvbuf);
+```
+
+## MAD dump and debug
+
+libibmad provides dump functions for every MAD structure, useful for debugging:
+
+```c
+/* Print all fields of a port info MAD to stdout */
+mad_dump_portinfo(rcvbuf, IB_SMP_DATA_SIZE);
+
+/* Print performance counters */
+mad_dump_perfcounters(rcvbuf, IB_PC_DATA_SZ);
+
+/* Generic: dump fields between start and end enum values */
+char textbuf[4096];
+mad_dump_fields(textbuf, sizeof(textbuf), rcvbuf, IB_MAD_SIZE,
+                IB_PORT_FIRST_F, IB_PORT_LAST_F);
+printf("%s", textbuf);
+```
+
+Set `ibdebug > 0` to enable verbose RPC tracing to stderr:
+
+```c
+extern int ibdebug;
+ibdebug = 1;
+```
+
+## MAD classes
+
+| Class constant | Value | Purpose |
+|---|---|---|
+| `IB_SMI_CLASS` | `0x01` | Subnet Management (LID-routed SMPs) |
+| `IB_SMI_DIRECT_CLASS` | `0x81` | Subnet Management (directed-route SMPs) |
+| `IB_SA_CLASS` | `0x03` | Subnet Administration (path, node, MC records) |
+| `IB_PERFORMANCE_CLASS` | `0x04` | Performance Management (port counters) |
+| `IB_DEVICE_MGMT_CLASS` | `0x06` | Device Management |
+| `IB_CM_CLASS` | `0x07` | Communication Management |
+| `IB_CC_CLASS` | `0x21` | Congestion Control |
+
+## Relationship with infiniband-diags
+
+Every diagnostic tool in the `infiniband-diags/` directory links against libibmad. The following tools illustrate common libibmad patterns:
+
+| Tool | libibmad features used |
+|---|---|
+| `ibstat` / `ibstatus` | Port enumeration via libibumad; no MADs |
+| `ibping` | Vendor MADs (`IB_VENDOR_OPENIB_PING_CLASS`) |
+| `perfquery` | `pma_query_via`, `IB_GSI_PORT_COUNTERS`, extended counters |
+| `ibroute` | SMP queries for linear and multicast forwarding tables |
+| `ibswitches` / `ibhosts` | SA node record queries |
+| `ibtracert` | Directed-route SMPs, path tracing |
+| `saquery` | Full SA query interface using `sa_rpc_call` |
+
+<Tip>
+The source files for these tools in `infiniband-diags/` are good reference implementations showing how to combine `mad_rpc_open_port`, `smp_query_via`, `pma_query_via`, and field accessors in real diagnostic workflows.
+</Tip>

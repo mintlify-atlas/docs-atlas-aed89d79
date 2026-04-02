@@ -1,0 +1,368 @@
+---
+title: Diagnostic tools
+description: InfiniBand fabric diagnostic and monitoring utilities
+---
+
+The `infiniband-diags` package provides a set of utilities for configuring, debugging, and maintaining InfiniBand fabrics. Tools range from low-level SMP MAD queries to high-level fabric topology discovery and performance counter collection.
+
+## Tools overview
+
+<CardGroup cols={2}>
+  <Card title="ibstat" icon="chart-bar">
+    Display basic status of local IB devices and ports: LID, SMLID, port state, link width, and physical state.
+  </Card>
+  <Card title="ibping" icon="radio">
+    IB-level ping between nodes using the IB SMA ping mechanism.
+  </Card>
+  <Card title="ibtracert" icon="route">
+    Trace the unicast or multicast path between two nodes using SMP MADs, displaying each hop.
+  </Card>
+  <Card title="iblinkinfo" icon="link">
+    Report link information for every port in the fabric, node by node.
+  </Card>
+  <Card title="ibnetdiscover" icon="network-wired">
+    Discover and display the full IB network topology, including all switches, CAs, and their connections.
+  </Card>
+  <Card title="perfquery" icon="gauge">
+    Query `PortCounters` and `PortCountersExtended` performance and error counters from any port.
+  </Card>
+  <Card title="ibportstate" icon="toggle-left">
+    Query and set the state of an IB port (active, down, etc.) and reset port counters.
+  </Card>
+  <Card title="ibaddr" icon="address-card">
+    Query the LID and GID assigned to a local or remote IB device port.
+  </Card>
+  <Card title="sminfo" icon="info">
+    Query the subnet manager's information block, priority, and activity state.
+  </Card>
+  <Card title="saquery" icon="database">
+    Query the Subnet Administrator for path records, node records, service records, and other SA data.
+  </Card>
+  <Card title="ibqueryerrors" icon="triangle-exclamation">
+    Scan all ports in the fabric and report error counters that exceed a configurable threshold.
+  </Card>
+  <Card title="smpquery / smpdump" icon="terminal">
+    Query SMP MADs directly from any node or dump raw SMP MAD responses.
+  </Card>
+</CardGroup>
+
+## Tool reference
+
+### ibstat
+
+Displays basic information obtained from the local IB driver.
+
+```bash
+ibstat                # status of all ports on all IB devices
+ibstat -l             # list all IB devices
+ibstat -p             # show port GUIDs
+ibstat mlx5_0 1       # show status of port 1 on mlx5_0
+ibstat -s mlx5_0      # short output for mlx5_0
+```
+
+Output includes LID, SM LID, port state, link width active, and port physical state.
+
+---
+
+### ibping
+
+Performs IB-level pings between nodes. Requires `ibping` to be run in server mode on the destination node.
+
+```bash
+# Start server on destination node
+ibping -S
+
+# Ping a destination by LID from the source node
+ibping -L 5
+
+# Ping by GUID
+ibping -G 0x0002c9000100d051
+```
+
+---
+
+### ibtracert
+
+Traces the path between two nodes using SMP MADs. Each hop along the path is displayed until the destination is reached or a hop does not respond.
+
+```bash
+ibtracert 4 16                                  # trace path between LIDs 4 and 16
+ibtracert -n 4 16                               # simple output format
+ibtracert -G 0x8f1040396522d 0x002c9000100d051  # trace using GUIDs
+ibtracert -m 0xc000 4 16                        # trace multicast path for MLID 0xc000
+```
+
+---
+
+### iblinkinfo
+
+Reports link info for each port in the fabric, node by node. Useful for identifying down links or unusual port configurations.
+
+```bash
+iblinkinfo                    # show all links in the fabric
+iblinkinfo -d                 # show only ports in the "Down" state
+iblinkinfo -l                 # one line per link (useful with grep)
+iblinkinfo --switches-only    # show switch ports only
+iblinkinfo --cas-only         # show CA ports only
+```
+
+---
+
+### ibnetdiscover
+
+Discovers and prints the full IB network topology: all switches, channel adapters (CAs), and routers with their connections.
+
+```bash
+ibnetdiscover                 # discover and print full topology
+ibnetdiscover -p              # show ports as well
+ibnetdiscover --cache <file>  # save topology to a cache file
+```
+
+The output can be saved as a topology file and used by other tools for offline analysis.
+
+---
+
+### perfquery
+
+Queries performance and error counters from a port using Performance Management Agent (PMA) GMPs.
+
+```bash
+perfquery                         # read local port counters
+perfquery 32 1                    # read counters from LID 32, port 1
+perfquery -x 32 1                 # read extended counters from LID 32, port 1
+perfquery -a 32                   # aggregate counters for all ports on LID 32
+perfquery -r 32 1                 # read and reset counters
+perfquery -R 32 2 0x0fff          # reset only error counters on port 2
+perfquery -a 32 1-10              # aggregate ports 1-10 on LID 32
+perfquery -l 32 1,4,8             # per-port output for ports 1, 4, and 8
+```
+
+<Note>
+Data counters (e.g., `PortXmitData`, `PortRcvData`) report octets divided by 4, not raw byte counts.
+</Note>
+
+---
+
+### ibportstate
+
+Queries and optionally modifies the state of an IB port.
+
+```bash
+ibportstate -D 0 1              # query port 1 state via directed route
+ibportstate -L 5 1 enable       # enable port 1 on LID 5
+ibportstate -L 5 1 disable      # disable port 1 on LID 5
+ibportstate -L 5 1 reset        # reset port 1 on LID 5
+```
+
+---
+
+### ibaddr
+
+Queries the LID and GID of a local or remote IB port.
+
+```bash
+ibaddr                          # show address of local port
+ibaddr -L 5                     # show address of node at LID 5
+ibaddr -G 0x0002c9000100d051    # show address of node with given GUID
+```
+
+---
+
+### sminfo
+
+Queries the subnet manager's information, priority, and activity state.
+
+```bash
+sminfo                          # query local SM info
+sminfo -L 1                     # query SM at LID 1
+```
+
+---
+
+### saquery
+
+Queries the SA for path records, node records, service records, and other fabric data.
+
+```bash
+saquery                         # list all node records
+saquery -p                      # list all path records
+saquery --src-to-dst 4,16       # path records from LID 4 to LID 16
+saquery -g                      # list all port GID records
+saquery --sminfo                # query SM info from the SA
+```
+
+---
+
+### ibccquery and ibccconfig
+
+Query and configure InfiniBand congestion control on switches and CAs.
+
+```bash
+ibccquery SwitchCongestionSetting 5 1     # query switch congestion settings at LID 5
+ibccconfig -L 5 SwitchCongestionSetting   # configure switch congestion settings
+```
+
+---
+
+### ibqueryerrors
+
+Scans all ports in the fabric and reports port error counters that exceed a threshold (default: 0).
+
+```bash
+ibqueryerrors                   # report all ports with any errors
+ibqueryerrors -r                # include remote port link information
+ibqueryerrors --data            # include transmit/receive data counters
+ibqueryerrors --switch          # switches only
+ibqueryerrors --ca              # CAs only
+ibqueryerrors --clear-errors    # clear error counters after reading
+```
+
+A custom threshold file can be specified with `--threshold-file`. The default file is at `/etc/infiniband-diags/error_thresholds`:
+
+```bash
+# error_thresholds example
+SymbolErrorCounter=10
+LinkErrorRecoveryCounter=10
+VL15Dropped=100
+```
+
+---
+
+### smpquery and smpdump
+
+Low-level tools for directly querying or dumping SMP MADs from any node in the fabric.
+
+```bash
+smpquery NodeInfo 5             # query NodeInfo from LID 5
+smpquery PortInfo 5 1           # query PortInfo from LID 5, port 1
+smpquery -D NodeInfo 0,1        # query NodeInfo via directed route 0,1
+
+smpdump 5 0x0011                # dump SMP attribute 0x0011 from LID 5
+```
+
+---
+
+### vendstat
+
+Queries vendor-specific statistics from Mellanox/NVIDIA switches and adapters.
+
+```bash
+vendstat -N 5                   # query vendor node info from LID 5
+vendstat -S 5                   # query vendor switch info from LID 5
+```
+
+---
+
+### ibroute
+
+Displays the unicast forwarding table of a switch.
+
+```bash
+ibroute 5                       # show forwarding table of switch at LID 5
+ibroute -a 5                    # show all LID entries, including empty ones
+```
+
+---
+
+### dump_fts
+
+Dumps the complete unicast and multicast forwarding tables for all switches in the fabric.
+
+```bash
+dump_fts                        # dump forwarding tables for all switches
+```
+
+## Common diagnostic workflows
+
+<Steps>
+  <Step title="Check device and port status">
+    Use `ibstat` to verify local IB devices are present and their ports are in the `Active` state:
+
+    ```bash
+    ibstat
+    ```
+
+    A healthy port shows:
+    ```
+    State: Active
+    Physical state: LinkUp
+    ```
+  </Step>
+  <Step title="Check link states across the fabric">
+    Use `iblinkinfo` to get a summary of all links. Filter for down ports:
+
+    ```bash
+    iblinkinfo -d
+    ```
+
+    A healthy fabric returns no output with `-d`. Any output indicates a port that is down.
+  </Step>
+  <Step title="Find ports with errors">
+    Use `ibqueryerrors` to scan all fabric ports and report any with non-zero error counters:
+
+    ```bash
+    ibqueryerrors -r
+    ```
+
+    The `-r` flag includes the remote port information, making it easier to identify which link the errors belong to.
+  </Step>
+  <Step title="Trace path between two hosts">
+    Use `ibtracert` to trace the path between two nodes by their LIDs:
+
+    ```bash
+    # Find the LIDs of the source and destination hosts
+    ibaddr
+
+    # Trace the path
+    ibtracert <src_lid> <dst_lid>
+    ```
+
+    Each line of output shows one hop: the switch or CA, the port, and the LID.
+  </Step>
+  <Step title="Collect performance counters">
+    Use `perfquery` to read performance counters from a specific port:
+
+    ```bash
+    perfquery <lid> <port>
+    ```
+
+    To continuously monitor and reset counters to track deltas:
+
+    ```bash
+    # Read and reset counters on LID 5, port 1
+    perfquery -r 5 1
+    ```
+  </Step>
+</Steps>
+
+## Privileges
+
+Most tools in `infiniband-diags` require root privileges or membership in the `rdma` group (or equivalent IB access group), because they directly issue SMP MADs via QP0.
+
+```bash
+# Run as root
+sudo ibstat
+
+# Or add the user to the appropriate group (distribution-dependent)
+usermod -aG rdma $USER
+```
+
+<Warning>
+Tools that use SMPs via QP0 to query data directly from the SMA operate outside strict InfiniBand specification compliance. In some environments, MKey protection or VM security policies may restrict their use. Ensure that the MKey is set appropriately if access is restricted.
+</Warning>
+
+## Common options
+
+Most tools share a common set of flags:
+
+| Flag | Description |
+|------|-------------|
+| `-C ca_name` | Use the specified local CA (e.g., `mlx5_0`) |
+| `-P port_num` | Use the specified local port number |
+| `-L lid` | Address a node by LID |
+| `-G guid` | Address a node by GUID |
+| `-D` | Use directed route addressing |
+| `-t timeout` | MAD response timeout in milliseconds |
+| `-v` | Verbose output |
+| `-V` | Debug-level verbose output |
+| `-h` | Show help |

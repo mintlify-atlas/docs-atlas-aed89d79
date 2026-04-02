@@ -1,0 +1,331 @@
+---
+title: "Memory regions"
+description: "Registering and managing RDMA memory regions"
+---
+
+A Memory Region (MR) registers a virtual memory range with the RDMA hardware so that the NIC can perform DMA to and from it. Registration pins the pages, obtains a local key (`lkey`) used in scatter/gather elements for `ibv_post_send` and `ibv_post_recv`, and optionally an remote key (`rkey`) that allows peer-initiated RDMA operations on that memory.
+
+```c
+#include <infiniband/verbs.h>
+```
+
+<Warning>
+  Memory registration locks pages in RAM. On Linux, the default `RLIMIT_MEMLOCK` limit is 64 KiB per process. For production workloads, raise the limit with `ulimit -l unlimited` (or set it in `/etc/security/limits.conf`), or run as root.
+</Warning>
+
+---
+
+## Access flags
+
+Pass a bitwise OR of the following `enum ibv_access_flags` values to the `access` parameter of registration functions:
+
+| Flag | Value | Description |
+|---|---|---|
+| `IBV_ACCESS_LOCAL_WRITE` | `1` | Allow local (CPU-side) write into the MR. Required when `IBV_ACCESS_REMOTE_WRITE` or `IBV_ACCESS_REMOTE_ATOMIC` is set. |
+| `IBV_ACCESS_REMOTE_WRITE` | `1<<1` | Allow peers to write into this MR via RDMA Write operations. Requires `IBV_ACCESS_LOCAL_WRITE`. |
+| `IBV_ACCESS_REMOTE_READ` | `1<<2` | Allow peers to read from this MR via RDMA Read operations. |
+| `IBV_ACCESS_REMOTE_ATOMIC` | `1<<3` | Allow peers to perform atomic operations on this MR. Requires `IBV_ACCESS_LOCAL_WRITE`. |
+| `IBV_ACCESS_MW_BIND` | `1<<4` | Allow memory window binding on this MR. |
+| `IBV_ACCESS_ZERO_BASED` | `1<<5` | Use byte offsets from the start of the MR rather than virtual addresses when accessing via `lkey` or `rkey`. |
+| `IBV_ACCESS_ON_DEMAND` | `1<<6` | Create an on-demand paging (ODP) MR. Set `addr=0` and `length=SIZE_MAX` for implicit ODP. |
+| `IBV_ACCESS_HUGETLB` | `1<<7` | Guarantee huge pages are used. Only valid with `IBV_ACCESS_ON_DEMAND`. |
+| `IBV_ACCESS_RELAXED_ORDERING` | — | Allow the NIC to deliver incoming RDMA writes out of order for improved throughput. |
+
+Local read access is always enabled and does not require a flag.
+
+---
+
+## ibv_reg_mr
+
+Registers a host memory region with the RDMA device.
+
+**Signature:**
+
+```c
+struct ibv_mr *ibv_reg_mr(struct ibv_pd *pd,
+                          void *addr,
+                          size_t length,
+                          int access);
+```
+
+**Parameters:**
+
+<ParamField path="pd" type="struct ibv_pd *">
+  The protection domain to associate with this MR.
+</ParamField>
+
+<ParamField path="addr" type="void *">
+  Starting virtual address of the memory range to register.
+</ParamField>
+
+<ParamField path="length" type="size_t">
+  Length in bytes of the memory range.
+</ParamField>
+
+<ParamField path="access" type="int">
+  Bitwise OR of `enum ibv_access_flags` values describing the desired access permissions.
+</ParamField>
+
+**Returns:** A pointer to `struct ibv_mr` on success, or `NULL` on failure (with `errno` set). The returned structure contains:
+- `mr->lkey` — local key used in `struct ibv_sge` when posting work requests
+- `mr->rkey` — remote key sent to peers to allow remote access
+- `mr->addr` — the registered starting address
+- `mr->length` — the registered length
+
+**Errors:** Common failure reasons include exceeding `RLIMIT_MEMLOCK`, passing an invalid address range, or requesting unsupported access flags.
+
+**Example:**
+
+```c
+size_t buf_size = 4096;
+void *buf = malloc(buf_size);
+
+struct ibv_mr *mr = ibv_reg_mr(pd, buf, buf_size,
+                               IBV_ACCESS_LOCAL_WRITE |
+                               IBV_ACCESS_REMOTE_READ |
+                               IBV_ACCESS_REMOTE_WRITE);
+if (!mr) {
+    perror("ibv_reg_mr");
+    return 1;
+}
+printf("lkey=0x%x rkey=0x%x\n", mr->lkey, mr->rkey);
+```
+
+---
+
+## ibv_dereg_mr
+
+Deregisters a memory region and releases associated resources.
+
+**Signature:**
+
+```c
+int ibv_dereg_mr(struct ibv_mr *mr);
+```
+
+**Parameters:**
+
+<ParamField path="mr" type="struct ibv_mr *">
+  The memory region to deregister.
+</ParamField>
+
+**Returns:** `0` on success, or a positive `errno` value on failure.
+
+**Errors:** Returns `EBUSY` if any memory window is still bound to this MR.
+
+---
+
+## ibv_rereg_mr
+
+Re-registers an existing MR, optionally changing its translation, protection domain, or access flags, without deregistering and re-registering.
+
+**Signature:**
+
+```c
+int ibv_rereg_mr(struct ibv_mr *mr,
+                 int flags,
+                 struct ibv_pd *pd,
+                 void *addr,
+                 size_t length,
+                 int access);
+```
+
+**Parameters:**
+
+<ParamField path="mr" type="struct ibv_mr *">
+  The MR to modify in place.
+</ParamField>
+
+<ParamField path="flags" type="int">
+  Bitwise OR of `enum ibv_rereg_mr_flags` controlling which attributes to change:
+  - `IBV_REREG_MR_CHANGE_TRANSLATION` — update `addr` and `length`
+  - `IBV_REREG_MR_CHANGE_PD` — move the MR to a new PD
+  - `IBV_REREG_MR_CHANGE_ACCESS` — update access permissions
+</ParamField>
+
+<ParamField path="pd" type="struct ibv_pd *">
+  New PD (only used when `IBV_REREG_MR_CHANGE_PD` is set).
+</ParamField>
+
+<ParamField path="addr" type="void *">
+  New starting address (only used when `IBV_REREG_MR_CHANGE_TRANSLATION` is set).
+</ParamField>
+
+<ParamField path="length" type="size_t">
+  New length in bytes (only used when `IBV_REREG_MR_CHANGE_TRANSLATION` is set).
+</ParamField>
+
+<ParamField path="access" type="int">
+  New access flags (only used when `IBV_REREG_MR_CHANGE_ACCESS` is set).
+</ParamField>
+
+**Returns:** `0` on success. On failure, returns a negative `enum ibv_rereg_mr_err_code` value. A return of `IBV_REREG_MR_ERR_INPUT` means the original MR is still valid. Other codes indicate the MR should not be used.
+
+---
+
+## Memory windows
+
+Memory windows allow fine-grained, revocable access control over sub-ranges of a registered MR. A Type 1 window is bound via `ibv_bind_mw`; a Type 2 window via a special send work request.
+
+### ibv_alloc_mw
+
+```c
+struct ibv_mw *ibv_alloc_mw(struct ibv_pd *pd, enum ibv_mw_type type);
+```
+
+**Parameters:**
+
+<ParamField path="pd" type="struct ibv_pd *">
+  The protection domain for the memory window.
+</ParamField>
+
+<ParamField path="type" type="enum ibv_mw_type">
+  `IBV_MW_TYPE_1` for a Type 1 window (bound via `ibv_bind_mw`), or `IBV_MW_TYPE_2` for a Type 2 window (bound via a send work request).
+</ParamField>
+
+**Returns:** A pointer to `struct ibv_mw` on success, or `NULL` on failure. The `mw->rkey` is the remote key to share with the peer after binding.
+
+### ibv_dealloc_mw
+
+```c
+int ibv_dealloc_mw(struct ibv_mw *mw);
+```
+
+**Parameters:**
+
+<ParamField path="mw" type="struct ibv_mw *">
+  The memory window to deallocate.
+</ParamField>
+
+**Returns:** `0` on success, a positive `errno` value on failure.
+
+---
+
+## Device memory
+
+Device memory (DM) is on-card SRAM that can be registered as an MR. It offers lower latency than host memory for frequently-accessed data such as connection tables or small message buffers.
+
+### ibv_alloc_dm
+
+Allocates a region of on-device memory.
+
+```c
+struct ibv_dm *ibv_alloc_dm(struct ibv_context *context,
+                             struct ibv_alloc_dm_attr *attr);
+```
+
+**Parameters:**
+
+<ParamField path="context" type="struct ibv_context *">
+  An open device context.
+</ParamField>
+
+<ParamField path="attr" type="struct ibv_alloc_dm_attr *">
+  Allocation attributes. Set `attr->length` to the requested size in bytes. Set `attr->log_align_req` for alignment (0 means no special alignment).
+</ParamField>
+
+**Returns:** A pointer to `struct ibv_dm` on success, or `NULL` on failure. Check `device_attr_ex.max_dm_size` before calling to verify the device has sufficient device memory.
+
+<Note>
+  Device memory is a limited resource. Check `ibv_device_attr_ex.max_dm_size` to determine the available capacity before allocation.
+</Note>
+
+### ibv_reg_dm_mr
+
+Registers device memory as a memory region so it can be used in scatter/gather operations.
+
+```c
+struct ibv_mr *ibv_reg_dm_mr(struct ibv_pd *pd,
+                              struct ibv_dm *dm,
+                              uint64_t dm_offset,
+                              size_t length,
+                              unsigned int access);
+```
+
+**Parameters:**
+
+<ParamField path="pd" type="struct ibv_pd *">
+  The protection domain for the resulting MR.
+</ParamField>
+
+<ParamField path="dm" type="struct ibv_dm *">
+  The device memory object to register.
+</ParamField>
+
+<ParamField path="dm_offset" type="uint64_t">
+  Byte offset from the start of the DM allocation at which the MR begins.
+</ParamField>
+
+<ParamField path="length" type="size_t">
+  Length in bytes to register.
+</ParamField>
+
+<ParamField path="access" type="unsigned int">
+  Access flags (same `ibv_access_flags` values as `ibv_reg_mr`).
+</ParamField>
+
+**Returns:** A `struct ibv_mr *` with valid `lkey` and `rkey`, or `NULL` on failure.
+
+**Example:**
+
+```c
+struct ibv_alloc_dm_attr dm_attr = { .length = 4096 };
+struct ibv_dm *dm = ibv_alloc_dm(ctx, &dm_attr);
+if (!dm) {
+    perror("ibv_alloc_dm");
+    return 1;
+}
+
+struct ibv_mr *dm_mr = ibv_reg_dm_mr(pd, dm, 0, 4096,
+                                      IBV_ACCESS_LOCAL_WRITE |
+                                      IBV_ACCESS_REMOTE_WRITE |
+                                      IBV_ACCESS_ZERO_BASED);
+if (!dm_mr) {
+    perror("ibv_reg_dm_mr");
+    return 1;
+}
+```
+
+---
+
+## Full MR lifecycle example
+
+```c
+#include <infiniband/verbs.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+int rdma_setup_mr(struct ibv_pd *pd)
+{
+    const size_t buf_size = 65536;
+
+    /* Allocate and register a host buffer */
+    void *buf = aligned_alloc(4096, buf_size);
+    if (!buf) {
+        perror("aligned_alloc");
+        return 1;
+    }
+
+    struct ibv_mr *mr = ibv_reg_mr(pd, buf, buf_size,
+                                   IBV_ACCESS_LOCAL_WRITE  |
+                                   IBV_ACCESS_REMOTE_READ  |
+                                   IBV_ACCESS_REMOTE_WRITE);
+    if (!mr) {
+        perror("ibv_reg_mr");
+        free(buf);
+        return 1;
+    }
+
+    printf("Registered MR: lkey=0x%x rkey=0x%x\n",
+           mr->lkey, mr->rkey);
+
+    /* ... use mr->lkey in send/recv work requests ... */
+
+    /* Deregister before freeing the buffer */
+    if (ibv_dereg_mr(mr)) {
+        perror("ibv_dereg_mr");
+    }
+    free(buf);
+    return 0;
+}
+```

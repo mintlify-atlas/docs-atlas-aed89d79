@@ -1,0 +1,373 @@
+---
+title: "Device operations"
+description: "Functions for discovering and opening RDMA devices"
+---
+
+Use the device API to enumerate available RDMA devices, open a context for a chosen device, and query device and port capabilities. All other libibverbs operations require a valid `struct ibv_context *` obtained from `ibv_open_device`.
+
+```c
+#include <infiniband/verbs.h>
+```
+
+---
+
+## ibv_get_device_list
+
+Returns a null-terminated array of all RDMA devices currently visible to the process.
+
+**Signature:**
+
+```c
+struct ibv_device **ibv_get_device_list(int *num_devices);
+```
+
+**Parameters:**
+
+<ParamField path="num_devices" type="int *">
+  If non-NULL, the integer pointed to is set to the number of devices in the returned array.
+</ParamField>
+
+**Returns:** A heap-allocated, null-terminated array of `struct ibv_device *` pointers, or `NULL` on failure (with `errno` set). Free the array with `ibv_free_device_list` when done.
+
+<Note>
+  Open any devices you intend to use **before** calling `ibv_free_device_list`. Freeing the list does not close devices that have already been opened.
+</Note>
+
+**Example:**
+
+```c
+#include <infiniband/verbs.h>
+#include <stdio.h>
+
+int main(void)
+{
+    int num_devices;
+    struct ibv_device **dev_list = ibv_get_device_list(&num_devices);
+    if (!dev_list) {
+        perror("ibv_get_device_list");
+        return 1;
+    }
+
+    printf("Found %d RDMA device(s):\n", num_devices);
+    for (int i = 0; i < num_devices; i++)
+        printf("  %s\n", ibv_get_device_name(dev_list[i]));
+
+    ibv_free_device_list(dev_list);
+    return 0;
+}
+```
+
+---
+
+## ibv_free_device_list
+
+Frees the device array returned by `ibv_get_device_list`.
+
+**Signature:**
+
+```c
+void ibv_free_device_list(struct ibv_device **list);
+```
+
+**Parameters:**
+
+<ParamField path="list" type="struct ibv_device **">
+  The array returned by a prior call to `ibv_get_device_list`.
+</ParamField>
+
+**Returns:** Nothing.
+
+<Warning>
+  After calling `ibv_free_device_list`, do not dereference any pointer from the freed array unless you have already opened the corresponding device.
+</Warning>
+
+---
+
+## ibv_open_device
+
+Opens an RDMA device and allocates a context that is required by all subsequent verbs calls.
+
+**Signature:**
+
+```c
+struct ibv_context *ibv_open_device(struct ibv_device *device);
+```
+
+**Parameters:**
+
+<ParamField path="device" type="struct ibv_device *">
+  A device pointer obtained from `ibv_get_device_list`.
+</ParamField>
+
+**Returns:** A pointer to a newly allocated `struct ibv_context`, or `NULL` if the open fails.
+
+**Errors:** Common reasons for failure include insufficient permissions on the device file (`/dev/infiniband/uverbsN`) or the driver not being loaded.
+
+**Example:**
+
+```c
+struct ibv_context *ctx = ibv_open_device(dev_list[0]);
+if (!ctx) {
+    fprintf(stderr, "Failed to open device\n");
+    ibv_free_device_list(dev_list);
+    return 1;
+}
+```
+
+---
+
+## ibv_close_device
+
+Closes a device context and releases the associated resources.
+
+**Signature:**
+
+```c
+int ibv_close_device(struct ibv_context *context);
+```
+
+**Parameters:**
+
+<ParamField path="context" type="struct ibv_context *">
+  The device context to close.
+</ParamField>
+
+**Returns:** `0` on success, `-1` on failure.
+
+<Warning>
+  `ibv_close_device` does **not** release resources that were allocated using the context (protection domains, queue pairs, memory regions, etc.). Release all associated resources before calling this function to avoid leaks.
+</Warning>
+
+---
+
+## ibv_get_device_name
+
+Returns the kernel device name (e.g., `"mlx5_0"`) for a device.
+
+**Signature:**
+
+```c
+const char *ibv_get_device_name(struct ibv_device *device);
+```
+
+**Parameters:**
+
+<ParamField path="device" type="struct ibv_device *">
+  The device to query.
+</ParamField>
+
+**Returns:** A pointer to a null-terminated string owned by the library. Do not free this string.
+
+---
+
+## ibv_get_device_guid
+
+Returns the node GUID of a device in network byte order.
+
+**Signature:**
+
+```c
+__be64 ibv_get_device_guid(struct ibv_device *device);
+```
+
+**Parameters:**
+
+<ParamField path="device" type="struct ibv_device *">
+  The device to query.
+</ParamField>
+
+**Returns:** The 64-bit node GUID in big-endian byte order. Use `be64toh()` to convert to host byte order if needed.
+
+**Example:**
+
+```c
+#include <endian.h>
+__be64 guid = ibv_get_device_guid(dev_list[0]);
+printf("GUID: %016llx\n", (unsigned long long)be64toh(guid));
+```
+
+---
+
+## ibv_query_device
+
+Queries the capabilities of an open RDMA device.
+
+**Signature:**
+
+```c
+int ibv_query_device(struct ibv_context *context,
+                     struct ibv_device_attr *device_attr);
+```
+
+**Parameters:**
+
+<ParamField path="context" type="struct ibv_context *">
+  An open device context.
+</ParamField>
+
+<ParamField path="device_attr" type="struct ibv_device_attr *">
+  Output structure filled with device attributes on success. Key fields include:
+  - `fw_ver` — firmware version string
+  - `node_guid` — node GUID in network byte order
+  - `max_qp` — maximum number of QPs supported
+  - `max_cq` — maximum number of CQs supported
+  - `max_mr` — maximum number of MRs supported
+  - `max_pd` — maximum number of PDs supported
+  - `phys_port_cnt` — number of physical ports
+</ParamField>
+
+**Returns:** `0` on success, a positive `errno` value on failure.
+
+**Example:**
+
+```c
+struct ibv_device_attr dev_attr;
+if (ibv_query_device(ctx, &dev_attr)) {
+    perror("ibv_query_device");
+    return 1;
+}
+printf("FW version: %s\n", dev_attr.fw_ver);
+printf("Ports: %u, Max QPs: %d\n",
+       dev_attr.phys_port_cnt, dev_attr.max_qp);
+```
+
+---
+
+## ibv_query_device_ex
+
+Queries extended device capabilities, including optional features such as ODP, TSO, and RSS.
+
+**Signature:**
+
+```c
+int ibv_query_device_ex(struct ibv_context *context,
+                        const struct ibv_query_device_ex_input *input,
+                        struct ibv_device_attr_ex *attr);
+```
+
+**Parameters:**
+
+<ParamField path="context" type="struct ibv_context *">
+  An open device context.
+</ParamField>
+
+<ParamField path="input" type="const struct ibv_query_device_ex_input *">
+  Reserved for future extensions. Pass `NULL` or a zero-initialised struct.
+</ParamField>
+
+<ParamField path="attr" type="struct ibv_device_attr_ex *">
+  Output structure. `attr->orig_attr` mirrors `struct ibv_device_attr`. Additional fields cover ODP caps, TSO caps, RSS caps, device memory size, and more.
+</ParamField>
+
+**Returns:** `0` on success, a positive `errno` value on failure. Falls back to `ibv_query_device` automatically on older kernels.
+
+**Example:**
+
+```c
+struct ibv_device_attr_ex attr_ex;
+if (ibv_query_device_ex(ctx, NULL, &attr_ex)) {
+    perror("ibv_query_device_ex");
+    return 1;
+}
+printf("Max device memory: %lu bytes\n", attr_ex.max_dm_size);
+```
+
+---
+
+## ibv_query_port
+
+Queries the attributes of a specific port on an RDMA device.
+
+**Signature:**
+
+```c
+int ibv_query_port(struct ibv_context *context,
+                   uint8_t port_num,
+                   struct ibv_port_attr *port_attr);
+```
+
+**Parameters:**
+
+<ParamField path="context" type="struct ibv_context *">
+  An open device context.
+</ParamField>
+
+<ParamField path="port_num" type="uint8_t">
+  Port number to query. Ports are numbered from `1` to `phys_port_cnt`.
+</ParamField>
+
+<ParamField path="port_attr" type="struct ibv_port_attr *">
+  Output structure. Key fields:
+  - `state` — current port state (`IBV_PORT_ACTIVE`, etc.)
+  - `active_mtu` — active maximum transfer unit
+  - `lid` — local identifier (InfiniBand)
+  - `link_layer` — `IBV_LINK_LAYER_INFINIBAND` or `IBV_LINK_LAYER_ETHERNET`
+  - `gid_tbl_len` — number of valid GID table entries
+</ParamField>
+
+**Returns:** `0` on success, a positive `errno` value on failure.
+
+**Example:**
+
+```c
+struct ibv_port_attr port_attr;
+if (ibv_query_port(ctx, 1, &port_attr)) {
+    perror("ibv_query_port");
+    return 1;
+}
+if (port_attr.state != IBV_PORT_ACTIVE) {
+    fprintf(stderr, "Port 1 is not active\n");
+    return 1;
+}
+printf("LID: %u, Active MTU: %d\n",
+       port_attr.lid, port_attr.active_mtu);
+```
+
+---
+
+## ibv_query_gid
+
+Reads a single entry from the GID table of a port.
+
+**Signature:**
+
+```c
+int ibv_query_gid(struct ibv_context *context,
+                  uint8_t port_num,
+                  int index,
+                  union ibv_gid *gid);
+```
+
+**Parameters:**
+
+<ParamField path="context" type="struct ibv_context *">
+  An open device context.
+</ParamField>
+
+<ParamField path="port_num" type="uint8_t">
+  Port number whose GID table to read.
+</ParamField>
+
+<ParamField path="index" type="int">
+  Zero-based index into the GID table. Index `0` is always the port's primary GID. Valid range is `0` to `port_attr.gid_tbl_len - 1`.
+</ParamField>
+
+<ParamField path="gid" type="union ibv_gid *">
+  Output union. Access the raw 16-byte GID via `gid->raw`, or the structured form via `gid->global` (`subnet_prefix` and `interface_id`).
+</ParamField>
+
+**Returns:** `0` on success, a positive `errno` value on failure.
+
+**Example:**
+
+```c
+union ibv_gid gid;
+if (ibv_query_gid(ctx, 1, 0, &gid)) {
+    perror("ibv_query_gid");
+    return 1;
+}
+/* Print GID in human-readable form */
+char gid_str[INET6_ADDRSTRLEN];
+inet_ntop(AF_INET6, gid.raw, gid_str, sizeof(gid_str));
+printf("GID[0]: %s\n", gid_str);
+```

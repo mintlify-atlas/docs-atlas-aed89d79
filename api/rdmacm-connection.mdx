@@ -1,0 +1,611 @@
+---
+title: "Connection management functions"
+description: "rdma_* function reference for establishing RDMA connections"
+---
+
+This page documents the core librdmacm functions for creating, connecting, and tearing down RDMA connections. All functions require `#include <rdma/rdma_cma.h>`.
+
+## Structs
+
+### rdma_conn_param
+
+Passed to `rdma_connect` and `rdma_accept` to configure connection parameters and exchange private data.
+
+```c
+struct rdma_conn_param {
+    const void *private_data;
+    uint8_t     private_data_len;
+    uint8_t     responder_resources;
+    uint8_t     initiator_depth;
+    uint8_t     flow_control;
+    uint8_t     retry_count;        /* ignored when accepting */
+    uint8_t     rnr_retry_count;
+    uint8_t     srq;
+    uint32_t    qp_num;
+};
+```
+
+<ParamField path="private_data" type="const void *">
+  Pointer to a user-controlled buffer copied and sent to the remote side as part of the connection request or response. May be `NULL`. Limited to 56 bytes for `RDMA_PS_TCP` connections, or 180 bytes for `RDMA_PS_UDP`.
+</ParamField>
+
+<ParamField path="private_data_len" type="uint8_t">
+  Size in bytes of the `private_data` buffer. The actual bytes transferred may be larger than requested (transport padding).
+</ParamField>
+
+<ParamField path="responder_resources" type="uint8_t">
+  Maximum number of outstanding RDMA read and atomic operations the local side will accept from the remote side. Must not exceed `max_qp_rd_atom` on the local device or `max_qp_init_rd_atom` on the remote device. Applies to `RDMA_PS_TCP` only.
+</ParamField>
+
+<ParamField path="initiator_depth" type="uint8_t">
+  Maximum number of outstanding RDMA read and atomic operations the local side will issue to the remote side. Must not exceed `max_qp_init_rd_atom` locally or `max_qp_rd_atom` on the remote device. Applies to `RDMA_PS_TCP` only.
+</ParamField>
+
+<ParamField path="flow_control" type="uint8_t">
+  Whether hardware flow control is available. Exchanged with the remote peer for informational purposes; does not configure the QP directly. Applies to `RDMA_PS_TCP` only.
+</ParamField>
+
+<ParamField path="retry_count" type="uint8_t">
+  Maximum number of times a send, RDMA, or atomic operation is retried on timeout. 3-bit value on InfiniBand. Ignored by the server side when accepting. Applies to `RDMA_PS_TCP` only.
+</ParamField>
+
+<ParamField path="rnr_retry_count" type="uint8_t">
+  Maximum number of times the remote peer retries a send after receiving a Receiver Not Ready (RNR) NAK. RNR errors occur when a send arrives before a receive buffer has been posted. 3-bit value on InfiniBand. Applies to `RDMA_PS_TCP` only.
+</ParamField>
+
+<ParamField path="srq" type="uint8_t">
+  Whether the local QP uses a shared receive queue. Ignored by the library when a QP is created on the `rdma_cm_id`. Applies to `RDMA_PS_TCP` only.
+</ParamField>
+
+<ParamField path="qp_num" type="uint32_t">
+  QP number for the connection. Ignored by the library when a QP is created on the `rdma_cm_id`.
+</ParamField>
+
+---
+
+## Event channel functions
+
+### rdma_create_event_channel
+
+Opens a channel used to receive asynchronous CM events.
+
+**Signature:**
+```c
+struct rdma_event_channel *rdma_create_event_channel(void);
+```
+
+Each event channel maps to a file descriptor (`channel->fd`). The descriptor can be monitored with `poll(2)` or `epoll(7)`. Setting it to non-blocking mode enables asynchronous event processing.
+
+**Returns:** A pointer to a new `rdma_event_channel`, or `NULL` on failure (check `errno`).
+
+<Note>
+  Every channel created must be destroyed with `rdma_destroy_event_channel`.
+  All `rdma_cm_id`s associated with the channel and all pending events must be
+  released before destroying the channel.
+</Note>
+
+---
+
+### rdma_destroy_event_channel
+
+Closes an event channel and releases all associated resources.
+
+**Signature:**
+```c
+void rdma_destroy_event_channel(struct rdma_event_channel *channel);
+```
+
+<ParamField path="channel" type="struct rdma_event_channel *">
+  The event channel to destroy.
+</ParamField>
+
+<Warning>
+  All `rdma_cm_id`s on this channel must be destroyed and all events must be
+  acknowledged with `rdma_ack_cm_event` before calling this function.
+</Warning>
+
+---
+
+### rdma_get_cm_event
+
+Retrieves the next pending CM event from a channel.
+
+**Signature:**
+```c
+int rdma_get_cm_event(struct rdma_event_channel *channel,
+                      struct rdma_cm_event **event);
+```
+
+<ParamField path="channel" type="struct rdma_event_channel *">
+  The event channel to read from.
+</ParamField>
+
+<ParamField path="event" type="struct rdma_cm_event **">
+  Output pointer. On success, set to a newly allocated `rdma_cm_event` structure containing event type, status, and associated `rdma_cm_id`.
+</ParamField>
+
+By default this call blocks until an event is available. Set `O_NONBLOCK` on `channel->fd` to make it return immediately with `EAGAIN` when no events are pending.
+
+**Returns:** `0` on success, or `-1` on error with `errno` set.
+
+<Note>
+  Every event returned by this function must be acknowledged with
+  `rdma_ack_cm_event`. Destroying an `rdma_cm_id` will block until all
+  related events have been acknowledged.
+</Note>
+
+---
+
+### rdma_ack_cm_event
+
+Releases a CM event returned by `rdma_get_cm_event`.
+
+**Signature:**
+```c
+int rdma_ack_cm_event(struct rdma_cm_event *event);
+```
+
+<ParamField path="event" type="struct rdma_cm_event *">
+  The event to release. This frees the event structure and any associated private data buffer.
+</ParamField>
+
+There must be a one-to-one correspondence between successful `rdma_get_cm_event` calls and `rdma_ack_cm_event` calls.
+
+**Returns:** `0` on success, or `-1` on error with `errno` set.
+
+---
+
+## ID lifecycle functions
+
+### rdma_create_id
+
+Allocates a communication identifier.
+
+**Signature:**
+```c
+int rdma_create_id(struct rdma_event_channel *channel,
+                   struct rdma_cm_id **id,
+                   void *context,
+                   enum rdma_port_space ps);
+```
+
+<ParamField path="channel" type="struct rdma_event_channel *">
+  The event channel on which CM events for this id will be reported. Pass `NULL` for synchronous operation.
+</ParamField>
+
+<ParamField path="id" type="struct rdma_cm_id **">
+  Output pointer. Set to the newly allocated `rdma_cm_id` on success.
+</ParamField>
+
+<ParamField path="context" type="void *">
+  Arbitrary user-supplied context pointer stored in `id->context`. Not interpreted by the library.
+</ParamField>
+
+<ParamField path="ps" type="enum rdma_port_space">
+  Port space for the id: `RDMA_PS_TCP`, `RDMA_PS_UDP`, or `RDMA_PS_IB`.
+</ParamField>
+
+An `rdma_cm_id` is conceptually equivalent to a socket. It must be explicitly bound to an RDMA device before communication can occur. Communication events are reported on the associated event channel.
+
+**Returns:** `0` on success, or `-1` on error with `errno` set.
+
+---
+
+### rdma_destroy_id
+
+Releases a communication identifier and cancels any outstanding asynchronous operations.
+
+**Signature:**
+```c
+int rdma_destroy_id(struct rdma_cm_id *id);
+```
+
+<ParamField path="id" type="struct rdma_cm_id *">
+  The `rdma_cm_id` to destroy.
+</ParamField>
+
+Any QP associated with the id must be destroyed with `rdma_destroy_qp` before calling this function. All related events must be acknowledged.
+
+**Returns:** `0` on success, or `-1` on error with `errno` set.
+
+---
+
+### rdma_create_ep
+
+Allocates a communication identifier and optionally a QP in a single call, using pre-resolved address information from `rdma_getaddrinfo`. The created id operates synchronously.
+
+**Signature:**
+```c
+int rdma_create_ep(struct rdma_cm_id **id,
+                   struct rdma_addrinfo *res,
+                   struct ibv_pd *pd,
+                   struct ibv_qp_init_attr *qp_init_attr);
+```
+
+<ParamField path="id" type="struct rdma_cm_id **">
+  Output pointer for the new `rdma_cm_id`.
+</ParamField>
+
+<ParamField path="res" type="struct rdma_addrinfo *">
+  Address information returned by `rdma_getaddrinfo`. Specifies source and destination addresses, plus optional routing and connection information.
+</ParamField>
+
+<ParamField path="pd" type="struct ibv_pd *">
+  Optional protection domain for the QP. Ignored if `qp_init_attr` is `NULL`. If `NULL` and a QP is requested, a default PD is used.
+</ParamField>
+
+<ParamField path="qp_init_attr" type="struct ibv_qp_init_attr *">
+  Optional initial QP attributes. If provided and the id is for the active side (client), a QP is automatically created. If provided and the id is for the passive side (server, `RAI_PASSIVE` set), the pd and attrs are saved and used when `rdma_get_request` returns a new connection id.
+</ParamField>
+
+For active-side ids, `rdma_create_ep` replaces the `rdma_resolve_addr` + `rdma_resolve_route` sequence. For passive-side ids, it replaces `rdma_bind_addr`. The id must be released with `rdma_destroy_ep`.
+
+**Returns:** `0` on success, or `-1` on error with `errno` set.
+
+---
+
+## Address and route resolution
+
+### rdma_bind_addr
+
+Binds an `rdma_cm_id` to a local address.
+
+**Signature:**
+```c
+int rdma_bind_addr(struct rdma_cm_id *id, struct sockaddr *addr);
+```
+
+<ParamField path="id" type="struct rdma_cm_id *">
+  The `rdma_cm_id` to bind.
+</ParamField>
+
+<ParamField path="addr" type="struct sockaddr *">
+  Local address to bind to. Wildcard values (e.g. `INADDR_ANY`) are permitted. If a specific address is given, the id is also bound to the corresponding local RDMA device.
+</ParamField>
+
+Typically called on the server side before `rdma_listen` to fix a specific port. May also be called on the client side before `rdma_resolve_addr` to select a specific local interface.
+
+**Returns:** `0` on success, or `-1` on error with `errno` set.
+
+---
+
+### rdma_resolve_addr
+
+Resolves destination and optional source IP addresses to RDMA addresses.
+
+**Signature:**
+```c
+int rdma_resolve_addr(struct rdma_cm_id *id,
+                      struct sockaddr *src_addr,
+                      struct sockaddr *dst_addr,
+                      int timeout_ms);
+```
+
+<ParamField path="id" type="struct rdma_cm_id *">
+  The `rdma_cm_id` to resolve.
+</ParamField>
+
+<ParamField path="src_addr" type="struct sockaddr *">
+  Optional local source address. If provided, the id is bound to this address. If `NULL`, a source address is chosen based on local routing tables.
+</ParamField>
+
+<ParamField path="dst_addr" type="struct sockaddr *">
+  Destination IP address to resolve to an RDMA address. Resolution uses local routing tables and ARP. On InfiniBand, IPoIB must be running on both sides to map IP addresses to GIDs.
+</ParamField>
+
+<ParamField path="timeout_ms" type="int">
+  Maximum time in milliseconds to wait for address resolution to complete.
+</ParamField>
+
+On success, the id is bound to a local RDMA device. The result is delivered asynchronously as `RDMA_CM_EVENT_ADDR_RESOLVED` (or `RDMA_CM_EVENT_ADDR_ERROR` on failure). Called before `rdma_resolve_route` on the client side.
+
+**Returns:** `0` if the operation was successfully started, or `-1` on error with `errno` set.
+
+---
+
+### rdma_resolve_route
+
+Resolves the fabric route to the destination.
+
+**Signature:**
+```c
+int rdma_resolve_route(struct rdma_cm_id *id, int timeout_ms);
+```
+
+<ParamField path="id" type="struct rdma_cm_id *">
+  The `rdma_cm_id` for which to resolve the route. Address resolution must have already completed successfully.
+</ParamField>
+
+<ParamField path="timeout_ms" type="int">
+  Maximum time in milliseconds to wait for route resolution to complete.
+</ParamField>
+
+On InfiniBand, this step retrieves the path record from the Subnet Administrator. The result is delivered as `RDMA_CM_EVENT_ROUTE_RESOLVED` or `RDMA_CM_EVENT_ROUTE_ERROR`. Must be called after `rdma_resolve_addr` and before `rdma_connect` on the client side.
+
+**Returns:** `0` if the operation was successfully started, or `-1` on error with `errno` set.
+
+---
+
+## Connection functions
+
+### rdma_connect
+
+Initiates an active connection request to a remote destination.
+
+**Signature:**
+```c
+int rdma_connect(struct rdma_cm_id *id, struct rdma_conn_param *conn_param);
+```
+
+<ParamField path="id" type="struct rdma_cm_id *">
+  The `rdma_cm_id` to connect. Route resolution must be complete (via `rdma_resolve_route` or `rdma_create_ep`).
+</ParamField>
+
+<ParamField path="conn_param" type="struct rdma_conn_param *">
+  Optional connection parameters. If `NULL`, default values are used. Use this to set `responder_resources`, `initiator_depth`, `retry_count`, or to attach private data to the request.
+</ParamField>
+
+For `RDMA_PS_TCP`, initiates a reliable connected QP. For `RDMA_PS_UDP`, initiates a datagram service lookup. The result is delivered as `RDMA_CM_EVENT_ESTABLISHED` on success.
+
+On iWarp, the active side must send the first message after connection establishment.
+
+**Returns:** `0` if the operation was successfully started, or `-1` on error with `errno` set.
+
+---
+
+### rdma_listen
+
+Begins listening for incoming connection requests.
+
+**Signature:**
+```c
+int rdma_listen(struct rdma_cm_id *id, int backlog);
+```
+
+<ParamField path="id" type="struct rdma_cm_id *">
+  The `rdma_cm_id` to place into a listening state. Must have been bound to a local address with `rdma_bind_addr` (or created with `rdma_create_ep` using `RAI_PASSIVE`).
+</ParamField>
+
+<ParamField path="backlog" type="int">
+  Depth of the queue of pending connection requests.
+</ParamField>
+
+If the id is bound to a specific IP address, the listen is restricted to that address and the associated RDMA device. If bound to a port number only (wildcard address), the listen spans all local RDMA devices. Incoming requests are delivered as `RDMA_CM_EVENT_CONNECT_REQUEST` events, each carrying a new `rdma_cm_id`.
+
+**Returns:** `0` on success, or `-1` on error with `errno` set.
+
+---
+
+### rdma_accept
+
+Accepts an inbound connection request.
+
+**Signature:**
+```c
+int rdma_accept(struct rdma_cm_id *id, struct rdma_conn_param *conn_param);
+```
+
+<ParamField path="id" type="struct rdma_cm_id *">
+  The new `rdma_cm_id` delivered in the `RDMA_CM_EVENT_CONNECT_REQUEST` event. `rdma_accept` is called on this new id, not on the listening id.
+</ParamField>
+
+<ParamField path="conn_param" type="struct rdma_conn_param *">
+  Optional connection parameters for the accept response. If `NULL`, the values from the connect request event are used, adjusted down to local hardware limits. The private data limit is 196 bytes for `RDMA_PS_TCP`.
+</ParamField>
+
+<Warning>
+  If referencing the `rdma_conn_param` from the connect request event directly,
+  do not acknowledge that event until after `rdma_accept` returns.
+</Warning>
+
+**Returns:** `0` on success, or `-1` on error with `errno` set.
+
+---
+
+### rdma_reject
+
+Rejects an inbound connection request.
+
+**Signature:**
+```c
+int rdma_reject(struct rdma_cm_id *id,
+                const void *private_data,
+                uint8_t private_data_len);
+```
+
+<ParamField path="id" type="struct rdma_cm_id *">
+  The `rdma_cm_id` from the `RDMA_CM_EVENT_CONNECT_REQUEST` event to reject.
+</ParamField>
+
+<ParamField path="private_data" type="const void *">
+  Optional reject reason data sent to the remote side. May be `NULL`.
+</ParamField>
+
+<ParamField path="private_data_len" type="uint8_t">
+  Size of the private data buffer in bytes.
+</ParamField>
+
+Called from the passive side when the application cannot or will not accept the connection. The remote side receives `RDMA_CM_EVENT_REJECTED`.
+
+**Returns:** `0` on success, or `-1` on error with `errno` set.
+
+---
+
+### rdma_disconnect
+
+Disconnects a connection and transitions the associated QP to the error state.
+
+**Signature:**
+```c
+int rdma_disconnect(struct rdma_cm_id *id);
+```
+
+<ParamField path="id" type="struct rdma_cm_id *">
+  The connected `rdma_cm_id` to disconnect.
+</ParamField>
+
+Either side of a connection may initiate disconnection. After calling this function, both sides receive `RDMA_CM_EVENT_DISCONNECTED`. Any in-flight operations on the QP will complete with error.
+
+**Returns:** `0` on success, or `-1` on error with `errno` set.
+
+---
+
+## Complete example
+
+The following shows a minimal synchronous client-server pair using `rdma_create_ep`. This pattern avoids manual event channel management while still exercising the full connection lifecycle.
+
+<CodeGroup>
+
+```c server.c
+#include <rdma/rdma_cma.h>
+#include <rdma/rdma_verbs.h>
+#include <stdio.h>
+#include <string.h>
+
+#define PORT "7471"
+#define MSG_SIZE 16
+
+int main(void)
+{
+    struct rdma_addrinfo hints, *res;
+    struct rdma_cm_id *listen_id, *id;
+    struct ibv_qp_init_attr init_attr;
+    struct ibv_wc wc;
+    struct ibv_mr *recv_mr, *send_mr;
+    uint8_t recv_buf[MSG_SIZE], send_buf[MSG_SIZE];
+    int ret;
+
+    /* 1. Resolve passive-side address (bind address) */
+    memset(&hints, 0, sizeof hints);
+    hints.ai_flags     = RAI_PASSIVE;
+    hints.ai_port_space = RDMA_PS_TCP;
+    ret = rdma_getaddrinfo(NULL, PORT, &hints, &res);
+    if (ret) { perror("rdma_getaddrinfo"); return ret; }
+
+    /* 2. Create listening endpoint with QP template */
+    memset(&init_attr, 0, sizeof init_attr);
+    init_attr.cap.max_send_wr  = init_attr.cap.max_recv_wr  = 1;
+    init_attr.cap.max_send_sge = init_attr.cap.max_recv_sge = 1;
+    init_attr.sq_sig_all = 1;
+    ret = rdma_create_ep(&listen_id, res, NULL, &init_attr);
+    rdma_freeaddrinfo(res);
+    if (ret) { perror("rdma_create_ep"); return ret; }
+
+    /* 3. Listen for connections */
+    ret = rdma_listen(listen_id, 0);
+    if (ret) { perror("rdma_listen"); goto out_listen; }
+
+    /* 4. Block until a connection request arrives */
+    ret = rdma_get_request(listen_id, &id);
+    if (ret) { perror("rdma_get_request"); goto out_listen; }
+
+    /* 5. Register memory regions on the accepted id */
+    recv_mr = rdma_reg_msgs(id, recv_buf, MSG_SIZE);
+    send_mr = rdma_reg_msgs(id, send_buf, MSG_SIZE);
+
+    /* 6. Post a receive before accepting */
+    ret = rdma_post_recv(id, NULL, recv_buf, MSG_SIZE, recv_mr);
+    if (ret) { perror("rdma_post_recv"); goto out_ep; }
+
+    /* 7. Accept the connection */
+    ret = rdma_accept(id, NULL);
+    if (ret) { perror("rdma_accept"); goto out_ep; }
+
+    /* 8. Wait for message from client */
+    while ((ret = rdma_get_recv_comp(id, &wc)) == 0);
+    if (ret < 0) { perror("rdma_get_recv_comp"); goto out_disconnect; }
+
+    /* 9. Echo back */
+    memcpy(send_buf, recv_buf, MSG_SIZE);
+    ret = rdma_post_send(id, NULL, send_buf, MSG_SIZE, send_mr, 0);
+    if (ret) { perror("rdma_post_send"); goto out_disconnect; }
+    while ((ret = rdma_get_send_comp(id, &wc)) == 0);
+
+out_disconnect:
+    rdma_disconnect(id);
+out_ep:
+    rdma_dereg_mr(recv_mr);
+    rdma_dereg_mr(send_mr);
+    rdma_destroy_ep(id);
+out_listen:
+    rdma_destroy_ep(listen_id);
+    return ret < 0 ? ret : 0;
+}
+```
+
+```c client.c
+#include <rdma/rdma_cma.h>
+#include <rdma/rdma_verbs.h>
+#include <stdio.h>
+#include <string.h>
+
+#define SERVER  "127.0.0.1"
+#define PORT    "7471"
+#define MSG_SIZE 16
+
+int main(void)
+{
+    struct rdma_addrinfo hints, *res;
+    struct rdma_cm_id *id;
+    struct ibv_qp_init_attr attr;
+    struct ibv_wc wc;
+    struct ibv_mr *recv_mr, *send_mr;
+    uint8_t send_buf[MSG_SIZE], recv_buf[MSG_SIZE];
+    int ret;
+
+    /* 1. Resolve active-side address */
+    memset(&hints, 0, sizeof hints);
+    hints.ai_port_space = RDMA_PS_TCP;
+    ret = rdma_getaddrinfo(SERVER, PORT, &hints, &res);
+    if (ret) { perror("rdma_getaddrinfo"); return ret; }
+
+    /* 2. Create endpoint; rdma_create_ep handles addr+route resolution */
+    memset(&attr, 0, sizeof attr);
+    attr.cap.max_send_wr  = attr.cap.max_recv_wr  = 1;
+    attr.cap.max_send_sge = attr.cap.max_recv_sge = 1;
+    attr.sq_sig_all = 1;
+    ret = rdma_create_ep(&id, res, NULL, &attr);
+    rdma_freeaddrinfo(res);
+    if (ret) { perror("rdma_create_ep"); return ret; }
+
+    /* 3. Register memory and post a receive buffer */
+    recv_mr = rdma_reg_msgs(id, recv_buf, MSG_SIZE);
+    send_mr = rdma_reg_msgs(id, send_buf, MSG_SIZE);
+    memset(send_buf, 0x42, MSG_SIZE);
+
+    ret = rdma_post_recv(id, NULL, recv_buf, MSG_SIZE, recv_mr);
+    if (ret) { perror("rdma_post_recv"); goto out; }
+
+    /* 4. Connect to server */
+    ret = rdma_connect(id, NULL);
+    if (ret) { perror("rdma_connect"); goto out; }
+
+    /* 5. Send a message */
+    ret = rdma_post_send(id, NULL, send_buf, MSG_SIZE, send_mr, 0);
+    if (ret) { perror("rdma_post_send"); goto out_disconnect; }
+    while ((ret = rdma_get_send_comp(id, &wc)) == 0);
+    if (ret < 0) { perror("rdma_get_send_comp"); goto out_disconnect; }
+
+    /* 6. Wait for echo */
+    while ((ret = rdma_get_recv_comp(id, &wc)) == 0);
+    if (ret < 0) perror("rdma_get_recv_comp");
+    else ret = 0;
+
+out_disconnect:
+    rdma_disconnect(id);
+out:
+    rdma_dereg_mr(recv_mr);
+    rdma_dereg_mr(send_mr);
+    rdma_destroy_ep(id);
+    return ret < 0 ? ret : 0;
+}
+```
+
+</CodeGroup>
+
+<Note>
+  `rdma_create_ep` creates the id in synchronous mode. Calls to `rdma_connect`,
+  `rdma_listen`, and `rdma_get_request` block until they complete. To switch to
+  asynchronous operation, call `rdma_migrate_id` with a user-created event channel
+  after `rdma_create_ep` returns.
+</Note>

@@ -1,0 +1,252 @@
+---
+title: "libibverbs"
+description: "Core RDMA verbs library for direct hardware access from userspace"
+---
+
+libibverbs provides RDMA "verbs" for direct access to RDMA hardware (InfiniBand and iWARP) from userspace. Applications use the verbs API to bypass the kernel data path and communicate directly with RDMA-capable hardware through character device files at `/dev/infiniband/uverbsN`.
+
+For the full specification, refer to the InfiniBand Architecture Specification vol. 1, chapter 11, and the RDMA Consortium's RDMA Protocol Verbs Specification.
+
+## Device nodes
+
+The verbs library expects character device files at `/dev/infiniband/uverbsN`. When you load the kernel modules—including the low-level driver for your IB hardware and the `ib_uverbs` module—you should see entries in `/sys/class/infiniband_verbs` as well as the corresponding character device files.
+
+To create the device nodes automatically with udev, add a rule such as:
+
+```text udev rule
+KERNEL="uverbs*", NAME="infiniband/%k"
+```
+
+This creates device nodes named `/dev/infiniband/uverbs0`, `/dev/infiniband/uverbs1`, and so on. You can add `MODE` or `GROUP` directives to control access for non-privileged users.
+
+## Permissions
+
+<Note>
+Two separate permission requirements must both be satisfied before a userspace verbs program can run: access to the device file, and permission to lock memory.
+</Note>
+
+**Device file access** — Check permissions with:
+
+```bash
+ls -l /dev/infiniband/uverbs*
+```
+
+Ensure the user or group your program runs as can read and write the device file.
+
+**Memory lock limit** — The kernel must be permitted to lock memory for all registered memory regions and internal IB resources such as QPs and CQs. Check the current limit with:
+
+```bash
+ulimit -l
+```
+
+If the output is a small number such as `32` (in kilobytes), you must raise the limit. For ordinary users this is typically done in `/etc/security/limits.conf`:
+
+```text /etc/security/limits.conf
+# Allow the rdma group to lock unlimited memory
+@rdma soft memlock unlimited
+@rdma hard memlock unlimited
+```
+
+If you log in via OpenSSH with privilege separation enabled, additional `sshd` configuration may be required.
+
+## Key concepts
+
+<CardGroup cols={2}>
+  <Card title="Protection Domain (PD)" icon="shield">
+    A container that associates memory regions, queue pairs, and address handles. Resources in one PD cannot access resources in another.
+  </Card>
+  <Card title="Memory Region (MR)" icon="database">
+    A registered region of virtual memory that the RDMA hardware can access directly. Registration pins the pages and grants the device a key for remote or local access.
+  </Card>
+  <Card title="Queue Pair (QP)" icon="arrows-left-right">
+    A pair of send and receive queues used to post work requests. Corresponds to an endpoint for RDMA communication. Common types are RC (Reliable Connected), UC (Unreliable Connected), and UD (Unreliable Datagram).
+  </Card>
+  <Card title="Completion Queue (CQ)" icon="circle-check">
+    A queue where the hardware posts completion entries after a work request finishes. Multiple QPs can share a CQ.
+  </Card>
+  <Card title="Address Handle (AH)" icon="map-pin">
+    A descriptor for a remote UD destination, encapsulating the path information needed to reach that endpoint.
+  </Card>
+  <Card title="Scatter/Gather Entry (SGE)" icon="list">
+    Describes a contiguous memory buffer (address, length, and local key) used in work requests, enabling gather on send and scatter on receive.
+  </Card>
+</CardGroup>
+
+## Basic usage
+
+<Steps>
+  <Step title="Get the device list">
+    Call `ibv_get_device_list` to enumerate available RDMA devices. Iterate the returned array to select a device.
+
+    ```c
+    struct ibv_device **dev_list;
+    int num_devices;
+
+    dev_list = ibv_get_device_list(&num_devices);
+    if (!dev_list) {
+        perror("ibv_get_device_list");
+        return 1;
+    }
+    ```
+  </Step>
+  <Step title="Open the device">
+    Open the chosen device to obtain a context, which represents a connection to the kernel driver.
+
+    ```c
+    struct ibv_context *ctx;
+
+    ctx = ibv_open_device(dev_list[0]);
+    if (!ctx) {
+        perror("ibv_open_device");
+        return 1;
+    }
+
+    ibv_free_device_list(dev_list);
+    ```
+  </Step>
+  <Step title="Allocate a protection domain">
+    Create a PD to scope all resources you allocate.
+
+    ```c
+    struct ibv_pd *pd;
+
+    pd = ibv_alloc_pd(ctx);
+    if (!pd) {
+        perror("ibv_alloc_pd");
+        return 1;
+    }
+    ```
+  </Step>
+  <Step title="Register a memory region">
+    Pin a buffer and register it with the device. The resulting MR provides local and (optionally) remote access keys.
+
+    ```c
+    size_t buf_size = 4096;
+    void *buf = malloc(buf_size);
+    struct ibv_mr *mr;
+
+    mr = ibv_reg_mr(pd, buf, buf_size,
+                    IBV_ACCESS_LOCAL_WRITE |
+                    IBV_ACCESS_REMOTE_READ |
+                    IBV_ACCESS_REMOTE_WRITE);
+    if (!mr) {
+        perror("ibv_reg_mr");
+        return 1;
+    }
+    /* mr->lkey — local key for work requests  */
+    /* mr->rkey — remote key to share with peer */
+    ```
+  </Step>
+  <Step title="Create a completion queue">
+    Create a CQ to receive completions for send and receive operations.
+
+    ```c
+    struct ibv_cq *cq;
+
+    cq = ibv_create_cq(ctx, 64 /* cqe */, NULL, NULL, 0);
+    if (!cq) {
+        perror("ibv_create_cq");
+        return 1;
+    }
+    ```
+  </Step>
+  <Step title="Create and connect a queue pair">
+    Create a QP, then transition it through RESET → INIT → RTR → RTS states before posting work requests.
+
+    ```c
+    struct ibv_qp_init_attr qp_init_attr = {
+        .send_cq = cq,
+        .recv_cq = cq,
+        .cap = {
+            .max_send_wr  = 32,
+            .max_recv_wr  = 32,
+            .max_send_sge = 1,
+            .max_recv_sge = 1,
+        },
+        .qp_type = IBV_QPT_RC,
+    };
+
+    struct ibv_qp *qp = ibv_create_qp(pd, &qp_init_attr);
+    if (!qp) {
+        perror("ibv_create_qp");
+        return 1;
+    }
+    ```
+  </Step>
+  <Step title="Post work requests and poll completions">
+    Post sends or receives, then poll the CQ to collect completions.
+
+    ```c
+    struct ibv_sge sge = {
+        .addr   = (uint64_t)buf,
+        .length = buf_size,
+        .lkey   = mr->lkey,
+    };
+    struct ibv_send_wr wr = {
+        .wr_id      = 1,
+        .sg_list    = &sge,
+        .num_sge    = 1,
+        .opcode     = IBV_WR_SEND,
+        .send_flags = IBV_SEND_SIGNALED,
+    };
+    struct ibv_send_wr *bad_wr;
+
+    ibv_post_send(qp, &wr, &bad_wr);
+
+    struct ibv_wc wc;
+    while (ibv_poll_cq(cq, 1, &wc) == 0)
+        ; /* spin */
+    if (wc.status != IBV_WC_SUCCESS)
+        fprintf(stderr, "WC error: %s\n", ibv_wc_status_str(wc.status));
+    ```
+  </Step>
+  <Step title="Clean up">
+    Destroy resources in reverse order of creation.
+
+    ```c
+    ibv_destroy_qp(qp);
+    ibv_destroy_cq(cq);
+    ibv_dereg_mr(mr);
+    ibv_dealloc_pd(pd);
+    ibv_close_device(ctx);
+    free(buf);
+    ```
+  </Step>
+</Steps>
+
+## Debug logging
+
+Library and provider debug output is controlled by two environment variables:
+
+| Variable | Purpose |
+|---|---|
+| `VERBS_LOG_LEVEL` | Sets the verbosity level. Higher values produce more output. |
+| `VERBS_LOG_FILE` | Path to the file where log output is written. |
+
+When the library is built in release mode, only regular prints are emitted, and only when `VERBS_LOG_FILE` is set. When built in debug mode, both regular and datapath prints are written to `VERBS_LOG_FILE`, or to `stderr` if no file is specified.
+
+<Tip>
+Datapath debug prints are compiled out entirely in release builds. If you need them, build rdma-core with `-DCMAKE_BUILD_TYPE=Debug`.
+</Tip>
+
+```bash
+export VERBS_LOG_LEVEL=3
+export VERBS_LOG_FILE=/tmp/verbs.log
+./your_rdma_app
+```
+
+## Sample programs
+
+The `libibverbs/examples/` directory in the rdma-core source tree contains the following example programs:
+
+| Source file | Installed binary | Description |
+|---|---|---|
+| `device_list.c` | `ibv_devices` | Lists all available RDMA devices and their basic attributes. |
+| `devinfo.c` | `ibv_devinfo` | Prints detailed attributes for each device and its ports. |
+| `asyncwatch.c` | `ibv_asyncwatch` | Monitors and prints asynchronous events from a device. |
+| `rc_pingpong.c` | `ibv_rc_pingpong` | Latency and bandwidth test using Reliable Connected (RC) QPs. |
+| `uc_pingpong.c` | `ibv_uc_pingpong` | Latency and bandwidth test using Unreliable Connected (UC) QPs. |
+| `ud_pingpong.c` | `ibv_ud_pingpong` | Latency and bandwidth test using Unreliable Datagram (UD) QPs. |
+| `srq_pingpong.c` | `ibv_srq_pingpong` | Ping-pong test using Shared Receive Queues (SRQ). |
+| `xsrq_pingpong.c` | `ibv_xsrq_pingpong` | Extended SRQ ping-pong test using XRC transport. |
+| `pingpong.c` | (shared) | Common utility code shared by all pingpong programs (not installed directly). |

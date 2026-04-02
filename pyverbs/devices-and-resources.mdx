@@ -1,0 +1,364 @@
+---
+title: "Devices and resources"
+description: "Opening devices and managing RDMA resources with pyverbs"
+---
+
+This page walks through the core RDMA resource types: devices, protection domains, memory regions, completion queues, and related objects.
+
+## Opening and querying a device
+
+<Steps>
+  <Step title="Open a device">
+    Import `pyverbs.device` and open a device by name. The returned `Context` object is pyverbs' equivalent of `ibv_context`. The device is open and ready to use immediately.
+
+    ```python
+    import pyverbs.device as d
+    ctx = d.Context(name='mlx5_0')
+    ```
+  </Step>
+
+  <Step title="Query device attributes">
+    `ctx.query_device()` wraps `ibv_query_device()` and returns a `DeviceAttr` object. Printing it shows all attributes.
+
+    ```python
+    import pyverbs.device as d
+    ctx = d.Context(name='mlx5_0')
+    attr = ctx.query_device()
+    print(attr)
+    ```
+
+    Example output:
+
+    ```
+    FW version            : 16.24.0185
+    Node guid             : 9803:9b03:0000:e4c6
+    Sys image GUID        : 9803:9b03:0000:e4c6
+    Max MR size           : 0xffffffffffffffff
+    Page size cap         : 0xfffffffffffff000
+    Vendor ID             : 0x2c9
+    Vendor part ID        : 4119
+    HW version            : 0
+    Max QP                : 262144
+    Max QP WR             : 32768
+    Device cap flags      : 3983678518
+    Max SGE               : 30
+    Max SGE RD            : 30
+    MAX CQ                : 16777216
+    Max CQE               : 4194303
+    Max MR                : 16777216
+    Max PD                : 16777216
+    Max QP RD atom        : 16
+    Max EE RD atom        : 0
+    Max res RD atom       : 4194304
+    Max QP init RD atom   : 16
+    Max EE init RD atom   : 0
+    Atomic caps           : 1
+    Max EE                : 0
+    Max RDD               : 0
+    Max MW                : 16777216
+    Max raw IPv6 QPs      : 0
+    Max raw ethy QP       : 0
+    Max mcast group       : 2097152
+    Max mcast QP attach   : 240
+    Max AH                : 2147483647
+    Max FMR               : 0
+    Max map per FMR       : 2147483647
+    Max SRQ               : 8388608
+    Max SRQ WR            : 32767
+    Max SRQ SGE           : 31
+    Max PKeys             : 128
+    local CA ack delay    : 16
+    Phys port count       : 1
+    ```
+  </Step>
+
+  <Step title="Query a GID">
+    `ctx.query_gid()` wraps `ibv_query_gid()` and returns a `GID` object.
+
+    ```python
+    import pyverbs.device as d
+    ctx = d.Context(name='mlx5_0')
+    gid = ctx.query_gid(port_num=1, index=3)
+    print(gid)
+    ```
+
+    Example output:
+
+    ```
+    0000:0000:0000:0000:0000:ffff:0b87:3c08
+    ```
+  </Step>
+
+  <Step title="Query a port">
+    `ctx.query_port()` wraps `ibv_query_port()`. Pass the port number (1-indexed).
+
+    ```python
+    import pyverbs.device as d
+    ctx = d.Context(name='mlx5_0')
+    port_attr = ctx.query_port(1)
+    print(port_attr)
+    ```
+
+    Example output:
+
+    ```
+    Port state              : Active (4)
+    Max MTU                 : 4096 (5)
+    Active MTU              : 1024 (3)
+    SM lid                  : 0
+    Port lid                : 0
+    lmc                     : 0x0
+    Link layer              : Ethernet
+    Max message size        : 0x40000000
+    Port cap flags          : IBV_PORT_CM_SUP IBV_PORT_IP_BASED_GIDS
+    Port cap flags 2        :
+    max VL num              : 0
+    Bad Pkey counter        : 0
+    Qkey violations counter : 0
+    Gid table len           : 256
+    Pkey table len          : 1
+    SM sl                   : 0
+    Subnet timeout          : 0
+    Init type reply         : 0
+    Active width            : 4X (2)
+    Ative speed             : 25.0 Gbps (32)
+    Phys state              : Link up (5)
+    Flags                   : 1
+    ```
+  </Step>
+
+  <Step title="Extended device query">
+    `ctx.query_device_ex()` wraps `ibv_query_device_ex()` and exposes extended attributes such as `max_dm_size` and RSS capabilities.
+
+    ```python
+    import pyverbs.device as d
+
+    ctx = d.Context(name='mlx5_0')
+    attr = ctx.query_device_ex()
+    attr.max_dm_size
+    # 131072
+    attr.rss_caps.max_rwq_indirection_table_size
+    # 2048
+    ```
+  </Step>
+</Steps>
+
+## Protection domain
+
+A Protection Domain (PD) is required before allocating most other RDMA resources.
+
+```python
+import pyverbs.device as d
+from pyverbs.pd import PD
+
+with d.Context(name='mlx5_0') as ctx:
+    pd = PD(ctx)
+```
+
+### Parent domain with a custom allocator
+
+A `ParentDomain` wraps a PD and lets you supply your own aligned allocator. The example below uses `pyverbs.mem_alloc` to call `posix_memalign`.
+
+```python
+from pyverbs.pd import PD, ParentDomainInitAttr, ParentDomain, \
+    ParentDomainContext
+from pyverbs.device import Context
+import pyverbs.mem_alloc as mem
+
+
+def alloc_p_func(pd, context, size, alignment, resource_type):
+    p = mem.posix_memalign(size, alignment)
+    return p
+
+
+def free_p_func(pd, context, ptr, resource_type):
+    mem.free(ptr)
+
+
+ctx = Context(name='rocep0s8f0')
+pd = PD(ctx)
+pd_ctx = ParentDomainContext(pd, alloc_p_func, free_p_func)
+pd_attr = ParentDomainInitAttr(pd=pd, pd_context=pd_ctx)
+parent_domain = ParentDomain(ctx, attr=pd_attr)
+```
+
+## Memory region
+
+A Memory Region (MR) registers a user buffer with the RDMA device. Provide the PD, buffer length, and access flags from `ibv_access_flags`.
+
+```python
+import pyverbs.device as d
+from pyverbs.pd import PD
+from pyverbs.mr import MR
+from pyverbs.libibverbs_enums import ibv_access_flags
+
+with d.Context(name='mlx5_0') as ctx:
+    with PD(ctx) as pd:
+        mr_len = 1000
+        flags = ibv_access_flags.IBV_ACCESS_LOCAL_WRITE
+        mr = MR(pd, mr_len, flags)
+```
+
+## Memory window
+
+A Memory Window (MW) restricts remote access to a registered MR. The example below creates a type-1 memory window.
+
+<Note>
+  Unbind or close the memory window before deregistering any MR it is bound to.
+</Note>
+
+```python
+import pyverbs.device as d
+from pyverbs.pd import PD
+from pyverbs.mr import MW
+from pyverbs.libibverbs_enums import ibv_mw_type
+
+with d.Context(name='mlx5_0') as ctx:
+    with PD(ctx) as pd:
+        mw = MW(pd, ibv_mw_type.IBV_MW_TYPE_1)
+```
+
+## Device memory
+
+### Allocating a DM
+
+Device memory (DM) is memory located on the RDMA device itself, allocated via `ibv_alloc_dm()`.
+
+```python
+import random
+
+from pyverbs.device import DM, AllocDmAttr
+import pyverbs.device as d
+
+with d.Context(name='mlx5_0') as ctx:
+    attr = ctx.query_device_ex()
+    if attr.max_dm_size != 0:
+        dm_len = random.randint(4, attr.max_dm_size)
+        dm_attrs = AllocDmAttr(dm_len)
+        dm = DM(ctx, dm_attrs)
+```
+
+### Registering a device-memory MR (DMMR)
+
+A DMMR exposes device memory through the standard MR interface.
+
+```python
+import random
+
+from pyverbs.device import DM, AllocDmAttr
+from pyverbs.mr import DMMR
+import pyverbs.device as d
+from pyverbs.pd import PD
+from pyverbs.libibverbs_enums import ibv_access_flags
+
+with d.Context(name='mlx5_0') as ctx:
+    attr = ctx.query_device_ex()
+    if attr.max_dm_size != 0:
+        dm_len = random.randint(4, attr.max_dm_size)
+        dm_attrs = AllocDmAttr(dm_len)
+        dm_mr_len = random.randint(4, dm_len)
+        with DM(ctx, dm_attrs) as dm:
+            with PD(ctx) as pd:
+                dm_mr = DMMR(pd, dm_mr_len, ibv_access_flags.IBV_ACCESS_ZERO_BASED, dm=dm,
+                             offset=0)
+```
+
+## Completion queues
+
+<Tabs>
+  <Tab title="CQ">
+    A standard completion queue. The third parameter is an optional user-defined context. A `CompChannel` can be used for event-driven completion notification.
+
+    ```python
+    import random
+
+    from pyverbs.cq import CompChannel, CQ
+    import pyverbs.device as d
+
+    with d.Context(name='mlx5_0') as ctx:
+        num_cqes = random.randint(0, 200)
+        comp_vector = 0
+        if random.choice([True, False]):
+            with CompChannel(ctx) as cc:
+                cq = CQ(ctx, num_cqes, None, cc, comp_vector)
+        else:
+            cq = CQ(ctx, num_cqes, None, None, comp_vector)
+        print(cq)
+    ```
+
+    Example output:
+
+    ```
+    CQ
+    Handle                : 0
+    CQEs                  : 63
+    ```
+  </Tab>
+  <Tab title="CQEX">
+    An extended CQ (`ibv_create_cq_ex`) lets you request additional WC fields via `wc_flags`.
+
+    ```python
+    import random
+
+    from pyverbs.cq import CqInitAttrEx, CQEX
+    import pyverbs.device as d
+    from pyverbs.libibverbs_enums import ibv_create_cq_wc_flags
+
+    with d.Context(name='mlx5_0') as ctx:
+        num_cqe = random.randint(0, 200)
+        wc_flags = ibv_create_cq_wc_flags.IBV_WC_EX_WITH_CVLAN
+        comp_mask = 0
+        attrs = CqInitAttrEx(cqe=num_cqe, wc_flags=wc_flags, comp_mask=comp_mask,
+                             flags=0)
+        print(attrs)
+        cq_ex = CQEX(ctx, attrs)
+        print(cq_ex)
+    ```
+
+    Example output:
+
+    ```
+    Number of CQEs        : 10
+    WC flags              : IBV_WC_EX_WITH_CVLAN
+    comp mask             : 0
+    flags                 : 0
+
+    Extended CQ:
+    Handle                : 0
+    CQEs                  : 15
+    ```
+  </Tab>
+</Tabs>
+
+## Importing device, PD, and MR across processes
+
+Processes can share a device context by duplicating `cmd_fd` and passing it to a second `Context` constructor. The importing process can then import PDs and MRs by handle.
+
+<Warning>
+  You must manually call `unimport()` on each imported object before closing the original objects. The GC does not coordinate object lifetimes across processes.
+</Warning>
+
+```python
+from pyverbs.device import Context
+from pyverbs.pd import PD
+from pyverbs.mr import MR
+from pyverbs.libibverbs_enums import ibv_access_flags
+import os
+
+ctx = Context(name='ibp0s8f0')
+pd = PD(ctx)
+mr = MR(pd, 100, ibv_access_flags.IBV_ACCESS_LOCAL_WRITE)
+cmd_fd_dup = os.dup(ctx.cmd_fd)
+imported_ctx = Context(cmd_fd=cmd_fd_dup)
+imported_pd = PD(imported_ctx, handle=pd.handle)
+imported_mr = MR(imported_pd, handle=mr.handle)
+# MRs can be created as usual on the imported PD
+secondary_mr = MR(imported_pd, 100, ibv_access_flags.IBV_ACCESS_REMOTE_READ)
+# Unimport before closing the originals to prevent unexpected GC behaviour.
+imported_mr.unimport()
+imported_pd.unimport()
+```
+
+<Note>
+  Closing the underlying objects (e.g. the original `ctx`) is only supported from the process that created them. Imported objects cannot close the originals.
+</Note>

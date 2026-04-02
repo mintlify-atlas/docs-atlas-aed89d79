@@ -1,0 +1,199 @@
+---
+title: "Versioning and stable releases"
+description: "rdma-core versioning policy and stable branch maintenance"
+---
+
+## Package versioning scheme
+
+The overall package version is a single integer set in the top-level `CMakeLists.txt`:
+
+```cmake
+set(PACKAGE_VERSION "11")
+```
+
+For upstream releases, this is a monotonically increasing integer that reflects release ordering only — it does not encode ABI information.
+
+| Version format | When used |
+|---|---|
+| `16` | Upstream mainline release |
+| `16.1`, `16.2` | Branched stable releases (additional counter appended) |
+| `16.vendor2` | Unofficial or distributor-specific releases |
+
+When `PACKAGE_VERSION` is bumped, the packaging files must be updated in lockstep:
+
+```diff
+# CMakeLists.txt
+-set(PACKAGE_VERSION "15")
++set(PACKAGE_VERSION "16")
+
+# redhat/rdma-core.spec
+-Version: 15
++Version: 16
+
+# suse/rdma-core.spec
+-Version:        15
++Version:        16
+```
+
+## Shared library versioning
+
+Shared libraries use a three-field version number, for example `libibumad.so.3.1.11`:
+
+| Field | Example | Meaning |
+|---|---|---|
+| SONAME | `3` | Embedded in the ELF. Changing this breaks dynamic linking with old programs. Expected to never change. |
+| ABI level | `1` | Must be incremented whenever a new symbol is added. Encodes the ABI capability of the library. |
+| Release number | `11` | Copied from `PACKAGE_VERSION`. Increases with every release, even if the library code did not change. |
+
+A symlink from `libibumad.so.3` to `libibumad.so.3.1.11` is created at build time.
+
+### Adding a new symbol
+
+<Steps>
+  <Step title="Bump the ABI level">
+    Increase the ABI level in the library's `CMakeLists.txt` entry. It is safe to reuse the same ABI level for multiple new symbols within a single release, but once a release is tagged the ABI level is immutable:
+
+    ```diff
+     rdma_library(ibumad libibumad.map
+       # See Documentation/versioning.md
+    -  3 3.1.${PACKAGE_VERSION}
+    +  3 3.2.${PACKAGE_VERSION}
+    ```
+  </Step>
+  <Step title="Add the symbol to the version map">
+    Add a new stanza to the `.map` file. Do not add new symbols to existing stanzas — those are immutable after a release:
+
+    ```
+    IBUMAD_3.2 {
+        global:
+            umad_new_symbol;
+    } IBUMAD_1.0;
+    ```
+  </Step>
+  <Step title="Verify the symbol in the ELF">
+    Confirm the new symbol appears with the correct version tag:
+
+    ```sh
+    readelf -s build/lib/libibumad.so.3.1.11
+    # 35: ... umad_new_symbol@@IBUMAD_3.2
+    ```
+  </Step>
+  <Step title="Update the Debian symbols file">
+    Update `debian/libibumad3.symbols` to include the new versioned symbol.
+  </Step>
+</Steps>
+
+### Private symbols in libibverbs
+
+Symbols prefixed with `IBVERBS_PRIVATE_` in libibverbs are private to rdma-core. A single version stanza covers all private symbols; it is bumped whenever any private ABI change (add, remove, or modify) occurs.
+
+When the private symbol version is bumped, update the `Breaks` field in `debian/control`:
+
+```diff
+-Breaks: ibverbs-providers (<< 16~)
++Breaks: ibverbs-providers (<< 17~)
+```
+
+<Note>
+  Because private symbols use a single version stanza, there is no need for compat symbol versions on the private ABI. However, distributions must ensure that a matched set of provider libraries and libibverbs is installed.
+</Note>
+
+## Stable branches
+
+### Overview
+
+Upstream rdma-core is considered stable after each mainline release. Branched stable releases are created on an as-needed basis from a mainline release tag and accept bug fixes only — no new features.
+
+- Stable branches are named `stable-vXX` where `XX` is the base version number.
+- Branched releases append an additional counter to the version, e.g. `15.1`.
+- All bug fixes must be backported from mainline and applied by the stable branch maintainer.
+- Branches are maintained for approximately **4 years**.
+- Once a branch is no longer maintained its branch reference is deleted, but the release tags are kept permanently.
+
+**Current stable branch maintainer:** Nicolas Morey \<NMorey@suse.com\>
+
+### Release cadence
+
+Regular stable releases are typically generated at the same time as a mainline release. Some mainline releases may be skipped if not enough significant patches have accumulated. Additional stable releases can be generated as needed — for example, when required by a Linux distribution or by OFED.
+
+Contact the stable maintainer if a stable release is needed outside of the regular schedule.
+
+### Patch rules for stable
+
+<Warning>
+  Patches submitted to a stable branch must meet all of the following criteria. Submissions that do not comply will be rejected.
+</Warning>
+
+- The fix must be obviously correct and tested.
+- The patch must be no larger than 100 lines, including context.
+- It must fix exactly one thing.
+- It must fix a real bug that affects users — not a speculative "this could be a problem" fix.
+- The ABI must not be changed by the fix.
+
+## Submitting backports to stable
+
+Stable submissions follow the same process as [kernel stable](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/Documentation/process/stable-kernel-rules.rst). There are three options:
+
+<AccordionGroup>
+  <Accordion title="Option 1 — Cc tag at submission time (preferred)">
+    When sending a patch to master, add the following tag in the sign-off area:
+
+    ```
+    Cc: stable@linux-rdma.org
+    ```
+
+    Once merged to master, the patch will be applied to the stable tree automatically with no further action required from the author.
+
+    To target specific stable versions:
+
+    ```
+    Cc: stable@linux-rdma.org # v15.1 v14
+    ```
+
+    This is the easiest and most common approach and is strongly preferred.
+  </Accordion>
+  <Accordion title="Option 2 — Email after merge">
+    After a patch has been merged to master, send an email to [stable@linux-rdma.org](mailto:stable@linux-rdma.org) containing:
+    - The subject of the patch
+    - The upstream commit ID
+    - Why it should be applied to stable
+    - Which rdma-core version(s) it should target
+
+    This is useful when a patch was not initially flagged for stable at submission time, or when it needs additional regression testing before being backported.
+  </Accordion>
+  <Accordion title="Option 3 — Send the patch directly">
+    Send the patch directly to [stable@linux-rdma.org](mailto:stable@linux-rdma.org) after verifying it meets the patch rules above. The submission must include:
+    - The upstream commit ID in the changelog
+    - The target rdma-core version(s)
+    - A clear justification if the patch deviates from the upstream version (e.g. due to backport conflicts)
+
+    This option is especially useful when the patch requires special handling to apply cleanly to an older release.
+  </Accordion>
+</AccordionGroup>
+
+## Release process
+
+<Steps>
+  <Step title="Bump the package version">
+    Update `PACKAGE_VERSION` in `CMakeLists.txt` and the corresponding packaging files (`redhat/rdma-core.spec`, `suse/rdma-core.spec`) according to the versioning guide above.
+  </Step>
+  <Step title="Verify CI">
+    Push the version bump to master and confirm that CI reports a successful build.
+  </Step>
+  <Step title="Create a signed tag">
+    Create a local annotated, signed tag:
+
+    ```sh
+    git tag vX.X.X -a -s
+    ```
+  </Step>
+  <Step title="Publish the release">
+    Use `git release` to push the tag, trigger CI to upload the release tarball, and generate release notes from the tag annotation:
+
+    ```sh
+    git release
+    ```
+
+    The [github-release](https://github.com/mpalmer/github-release) gem is recommended for this step due to its simplicity.
+  </Step>
+</Steps>

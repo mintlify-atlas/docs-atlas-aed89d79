@@ -1,0 +1,204 @@
+---
+title: "Queue pairs"
+description: "Creating and using Queue Pairs for RDMA operations"
+---
+
+A Queue Pair (QP) is the fundamental transfer object in RDMA. Each QP has a Send Queue (SQ) and a Receive Queue (RQ), each backed by one or more completion queues. Work Requests are posted to the SQ or RQ and completions are polled from the linked CQ.
+
+## Core types
+
+| Type | Description |
+|---|---|
+| `QPCap` | Capacity parameters: max WRs per queue, SGEs per WR, inline data |
+| `QPInitAttr` | Init attributes for a standard QP: type, send/recv CQ, capabilities |
+| `QPInitAttrEx` | Extended init attributes: PD, send ops flags, additional comp mask bits |
+| `QPAttr` | Transition attributes (port, access flags, path info) used when modifying QP state |
+| `QP` | Standard queue pair |
+| `QPEx` | Extended queue pair, required for the extended post-send interface |
+
+## Creating a UD QP
+
+The example below creates a UD QP in one step. Passing a `QPAttr()` object to the `QP` constructor signals pyverbs to transition the QP all the way to RTS automatically.
+
+```python
+from pyverbs.qp import QPCap, QPInitAttr, QPAttr, QP
+from pyverbs.addr import GlobalRoute
+from pyverbs.addr import AH, AHAttr
+import pyverbs.device as d
+from pyverbs.libibverbs_enums import ibv_qp_type
+from pyverbs.pd import PD
+from pyverbs.cq import CQ
+import pyverbs.wr as pwr
+
+
+ctx = d.Context(name='mlx5_0')
+pd = PD(ctx)
+cq = CQ(ctx, 100, None, None, 0)
+cap = QPCap(100, 10, 1, 1, 0)
+qia = QPInitAttr(cap=cap, qp_type=ibv_qp_type.IBV_QPT_UD, scq=cq, rcq=cq)
+# A UD QP will be in RTS if a QPAttr object is provided
+udqp = QP(pd, qia, QPAttr())
+```
+
+## Posting a send
+
+After the QP is in RTS, build an address handle and a `SendWR`, then post:
+
+```python
+port_num = 1
+gid_index = 3  # Hard-coded for RoCE v2 interface
+gid = ctx.query_gid(port_num, gid_index)
+gr = GlobalRoute(dgid=gid, sgid_index=gid_index)
+ah_attr = AHAttr(gr=gr, is_global=1, port_num=port_num)
+ah = AH(pd, ah_attr)
+wr = pwr.SendWR()
+wr.set_wr_ud(ah, 0x1101, 0)  # in real life, use real values
+udqp.post_send(wr)
+```
+
+## Extended QP
+
+An extended QP exposes new send opcodes, vendor-specific opcodes, and vendor-specific QP types. Use `QPInitAttrEx` with `IBV_QP_INIT_ATTR_SEND_OPS_FLAGS` set in `comp_mask`.
+
+<Note>
+  `IBV_QP_INIT_ATTR_SEND_OPS_FLAGS` is mandatory when using the extended post-send interface.
+</Note>
+
+```python
+from pyverbs.qp import QPCap, QPInitAttrEx, QPAttr, QPEx
+import pyverbs.device as d
+from pyverbs.libibverbs_enums import ibv_qp_type, ibv_qp_init_attr_mask
+from pyverbs.pd import PD
+from pyverbs.cq import CQ
+
+
+ctx = d.Context(name='mlx5_0')
+pd = PD(ctx)
+cq = CQ(ctx, 100)
+cap = QPCap(100, 10, 1, 1, 0)
+qia = QPInitAttrEx(qp_type=ibv_qp_type.IBV_QPT_UD, scq=cq, rcq=cq, cap=cap, pd=pd,
+                   comp_mask=ibv_qp_init_attr_mask.IBV_QP_INIT_ATTR_SEND_OPS_FLAGS | \
+                   ibv_qp_init_attr_mask.IBV_QP_INIT_ATTR_PD)
+qp = QPEx(ctx, qia)
+```
+
+## Flow steering
+
+Flow steering rules define which packets the hardware delivers to a QP. A _spec_ matches at one network layer; a _flow_ is an ordered collection of specs.
+
+### Flow and FlowAttr
+
+```python
+from pyverbs.qp import QPCap, QPInitAttr, QPAttr, QP
+from pyverbs.flow import FlowAttr, Flow
+from pyverbs.spec import EthSpec
+import pyverbs.device as d
+from pyverbs.libibverbs_enums import ibv_qp_type
+from pyverbs.pd import PD
+from pyverbs.cq import CQ
+
+
+ctx = d.Context(name='rocep0s8f0')
+pd = PD(ctx)
+cq = CQ(ctx, 100, None, None, 0)
+cap = QPCap(100, 10, 1, 1, 0)
+qia = QPInitAttr(cap=cap, qp_type=ibv_qp_type.IBV_QPT_UD, scq=cq, rcq=cq)
+qp = QP(pd, qia, QPAttr())
+
+# Create Eth spec
+eth_spec = EthSpec(ether_type=0x800, dst_mac="01:50:56:19:20:a7")
+eth_spec.src_mac = "24:8a:07:a5:28:c8"
+eth_spec.src_mac_mask = "ff:ff:ff:ff:ff:ff"
+
+# Create Flow
+flow_attr = FlowAttr(num_of_specs=1)
+flow_attr.specs.append(eth_spec)
+flow = Flow(qp, flow_attr)
+```
+
+### Ethernet spec
+
+Each spec matches at a specific network layer. When you provide a field value without a mask, pyverbs sets the mask to all-ones. Set the mask explicitly when you need partial matching.
+
+```python
+from pyverbs.spec import EthSpec
+eth_spec = EthSpec(src_mac="ab:cd:ef:ab:cd:ef", vlan_tag=0x123, is_inner=1)
+eth_spec.dst_mac = "de:de:de:00:de:de"
+eth_spec.dst_mac_mask = "ff:ff:ff:ff:ff:ff"
+eth_spec.ether_type = 0x321
+eth_spec.ether_type_mask = 0xffff
+print(f'{eth_spec}')
+```
+
+Example output:
+
+```
+Spec type       : IBV_FLOW_SPEC_INNER IBV_FLOW_SPEC_ETH
+Size            : 40
+Src mac         : ab:cd:ef:ab:cd:ef    mask: ff:ff:ff:ff:ff:ff
+Dst mac         : de:de:de:00:de:de    mask: ff:ff:ff:ff:ff:ff
+Ether type      : 8451                 mask: 65535
+Vlan tag        : 8961                 mask: 65535
+```
+
+<Tip>
+  Ethernet, IPv4, TCP/UDP, IPv6, and ESP specs support the `is_inner` flag for tunnel offload matching. Outer matching is the default.
+</Tip>
+
+## XRCD
+
+An Extended Reliable Connection Domain (XRCD) is backed by a file descriptor and is used with XRC queue pairs.
+
+```python
+from pyverbs.xrcd import XRCD, XRCDInitAttr
+import pyverbs.device as d
+from pyverbs.libibverbs_enums import ibv_xrcd_init_attr_mask
+import stat
+import os
+
+
+ctx = d.Context(name='ibp0s8f0')
+xrcd_fd = os.open('/tmp/xrcd', os.O_RDONLY | os.O_CREAT,
+                  stat.S_IRUSR | stat.S_IRGRP)
+init = XRCDInitAttr(ibv_xrcd_init_attr_mask.IBV_XRCD_INIT_ATTR_FD |
+                    ibv_xrcd_init_attr_mask.IBV_XRCD_INIT_ATTR_OFLAGS,
+                    os.O_CREAT, xrcd_fd)
+xrcd = XRCD(ctx, init)
+```
+
+## Shared Receive Queue (SRQ)
+
+The example below creates an XRC SRQ, which requires an XRCD, a PD, and a CQ.
+
+```python
+from pyverbs.xrcd import XRCD, XRCDInitAttr
+from pyverbs.srq import SRQ, SrqInitAttrEx
+import pyverbs.device as d
+from pyverbs.libibverbs_enums import ibv_xrcd_init_attr_mask, ibv_srq_type, ibv_srq_init_attr_mask
+from pyverbs.cq import CQ
+from pyverbs.pd import PD
+import stat
+import os
+
+
+ctx = d.Context(name='ibp0s8f0')
+pd = PD(ctx)
+cq = CQ(ctx, 100, None, None, 0)
+xrcd_fd = os.open('/tmp/xrcd', os.O_RDONLY | os.O_CREAT,
+                  stat.S_IRUSR | stat.S_IRGRP)
+init = XRCDInitAttr(ibv_xrcd_init_attr_mask.IBV_XRCD_INIT_ATTR_FD |
+                    ibv_xrcd_init_attr_mask.IBV_XRCD_INIT_ATTR_OFLAGS,
+                    os.O_CREAT, xrcd_fd)
+xrcd = XRCD(ctx, init)
+
+srq_attr = SrqInitAttrEx(max_wr=10)
+srq_attr.srq_type = ibv_srq_type.IBV_SRQT_XRC
+srq_attr.pd = pd
+srq_attr.xrcd = xrcd
+srq_attr.cq = cq
+srq_attr.comp_mask = (ibv_srq_init_attr_mask.IBV_SRQ_INIT_ATTR_TYPE |
+                      ibv_srq_init_attr_mask.IBV_SRQ_INIT_ATTR_PD |
+                      ibv_srq_init_attr_mask.IBV_SRQ_INIT_ATTR_CQ |
+                      ibv_srq_init_attr_mask.IBV_SRQ_INIT_ATTR_XRCD)
+srq = SRQ(ctx, srq_attr)
+```

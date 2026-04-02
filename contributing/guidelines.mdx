@@ -1,0 +1,156 @@
+---
+title: "Contributing guidelines"
+description: "How to contribute patches and features to rdma-core"
+---
+
+rdma-core is a userspace project for a Linux kernel interface. It follows many of the same conventions as contributing to the Linux kernel itself.
+
+## Contribution model
+
+Each contribution must follow these core principles:
+
+- **One change per patch.** Carefully describe your change in the commit message and break work into appropriate, reviewable commits. Refer to the [Linux Kernel Submitting Patches](https://github.com/torvalds/linux/blob/master/Documentation/process/submitting-patches.rst) guide for general guidance.
+- **Signed-off-by line (DCO).** Every commit must include a `Signed-off-by` line to certify that the submission is appropriately licensed and that you have the legal authority to submit it. See the [Developer Certificate of Origin](#developers-certificate-of-origin) section below.
+- **Linux Kernel coding style.** Follow the [Linux Kernel coding style](https://github.com/torvalds/linux/blob/master/Documentation/process/coding-style.rst) throughout your changes.
+
+Commits that fix bugs should include a `Fixes:` line to assist with backporting.
+
+## Submitting via GitHub Pull Request
+
+Changes to rdma-core are delivered via [GitHub Pull Requests](https://github.com/linux-rdma/rdma-core) to the rdma-core repository. Each pull request should have a descriptive title and a "cover letter" summary describing what commits are present.
+
+<Steps>
+  <Step title="Create a GitHub account">
+    If you don't already have one, create a GitHub account at github.com.
+  </Step>
+  <Step title="Fork the repository">
+    Fork the [linux-rdma/rdma-core](https://github.com/linux-rdma/rdma-core) project on GitHub.
+  </Step>
+  <Step title="Clone your fork locally">
+    Clone your fork and ensure your local branch is up to date with the tip of rdma-core:
+
+    ```sh
+    git clone https://github.com/<your-username>/rdma-core.git
+    ```
+  </Step>
+  <Step title="Make your changes">
+    Form your commits, ensure they are correct, and include `Signed-off-by` lines (`git commit -s`).
+  </Step>
+  <Step title="Push to a dedicated branch">
+    Push your commits to a dedicated branch in your GitHub fork:
+
+    ```sh
+    git push origin my-feature-branch
+    ```
+  </Step>
+  <Step title="Open a Pull Request">
+    Using the GitHub interface, open a Pull Request from your dedicated branch to the main rdma-core repository.
+  </Step>
+</Steps>
+
+## Making revisions
+
+If reviewers request changes, integrate them directly into the existing commits and update the pull request with a force push:
+
+```sh
+git push --force origin my-feature-branch
+```
+
+As a courtesy to reviewers, describe what changed in a Pull Request comment and consider including a before/after diff in the note.
+
+<Warning>
+  Do not close and reopen a new pull request for the same topic. Update the existing PR via force push only.
+</Warning>
+
+## Continuous integration
+
+rdma-core runs a matrix of compile tests on every pull request to verify that the project builds correctly across the wide range of supported distributions and compilers. Static analysis passes are also included to catch bugs early.
+
+- **Red X:** A serious error was found and must be corrected before the PR can advance.
+- **Green check:** The build passed, but you should still review the details. `checkpatch` output is informative — not all of its suggestions need to be acted on.
+
+You can run a build equivalent to the Azure Pipelines (AZP) CI locally using Docker and the `buildlib/cbuild` script:
+
+```sh
+buildlib/cbuild build-images azp
+buildlib/cbuild pkg azp
+```
+
+## Coordinating with kernel changes
+
+Some rdma-core changes depend on new kernel uAPI additions. These require kernel and userspace changes to be presented together for review.
+
+<Steps>
+  <Step title="Prepare patches together">
+    Develop the kernel patches and rdma-core patches in tandem and test them together before submitting.
+  </Step>
+  <Step title="Sync kernel headers (pre-final)">
+    The first commit in your series should synchronize the kernel header copies in rdma-core with the proposed new kernel headers. Use the `kernel-headers/update` script with `--not-final` until official commits are available in the canonical tree:
+
+    ```sh
+    kernel-headers/update ~/linux.git HEAD --not-final
+    ```
+  </Step>
+  <Step title="Submit both sets of patches">
+    Send the rdma-core changes as a GitHub PR. Send the kernel patches to [linux-rdma@vger.kernel.org](mailto:linux-rdma@vger.kernel.org), referencing the GitHub PR URL in the cover letter.
+  </Step>
+  <Step title="Wait for the kernel tag">
+    The GitHub PR will be tagged `needs-kernel-patch` and will not advance until the kernel component is merged.
+  </Step>
+  <Step title="Finalize kernel headers">
+    Once the kernel commits land in the canonical tree, amend the kernel-headers commit using the final commit ID and force push:
+
+    ```sh
+    kernel-headers/update ~/linux.git <commit-ID> --amend
+    git push --force origin my-feature-branch
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  Newer kernels must always work with older rdma-core, and newer rdma-core must always work with older kernels. Changes that force a simultaneous upgrade of both kernel and rdma-core are forbidden.
+</Warning>
+
+## Mailing list
+
+Patches of general interest should also be sent to the mailing list [linux-rdma@vger.kernel.org](mailto:linux-rdma@vger.kernel.org) for detailed discussion. This is especially important for patches that modify ELF versioned symbols or external programming APIs.
+
+All patches must have a GitHub Pull Request. Minor patches may skip the mailing list, but significant changes — particularly those touching the public API — should always be sent for broader review.
+
+## ABI rules
+
+<Warning>
+  Breaking the ABI of any exported symbol is forbidden.
+</Warning>
+
+All new library APIs that can be called externally from rdma-core — including device-specific "dv" APIs — require:
+
+1. A man page describing the API.
+2. Submission to the mailing list for review.
+
+## Developer's Certificate of Origin
+
+By making a contribution to this project, you certify that:
+
+<AccordionGroup>
+  <Accordion title="(a) Original work">
+    The contribution was created in whole or in part by you and you have the right to submit it under the open source license indicated in the file.
+  </Accordion>
+  <Accordion title="(b) Based on prior work">
+    The contribution is based upon previous work that, to the best of your knowledge, is covered under an appropriate open source license and you have the right under that license to submit that work with modifications, whether created in whole or in part by you, under the same open source license (unless permitted to submit under a different license), as indicated in the file.
+  </Accordion>
+  <Accordion title="(c) Provided by a third party">
+    The contribution was provided directly to you by some other person who certified (a), (b), or (c) and you have not modified it.
+  </Accordion>
+  <Accordion title="(d) Public record">
+    You understand and agree that this project and the contribution are public and that a record of the contribution (including all personal information submitted with it, including your sign-off) is maintained indefinitely and may be redistributed consistent with this project or the open source license(s) involved.
+  </Accordion>
+</AccordionGroup>
+
+To accept the DCO, add a `Signed-off-by` line to each commit using your real name (no pseudonyms or anonymous contributions):
+
+```
+Signed-off-by: Random J Developer <random@developer.example.org>
+```
+
+`git commit -s` adds this line automatically. `git revert -s` does the same for reverts.

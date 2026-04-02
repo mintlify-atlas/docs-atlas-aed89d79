@@ -1,0 +1,87 @@
+---
+title: "pyverbs overview"
+description: "Python bindings for rdma-core's RDMA stack"
+---
+
+Pyverbs provides a Python API over rdma-core, the Linux userspace C API for the RDMA stack. It is implemented in [Cython](https://cython.org/), which lets Python code call into the underlying C library with minimal overhead.
+
+## Goals
+
+Pyverbs was built with three goals in mind:
+
+1. **Easier RDMA access.** RDMA has a steep learning curve, and the C interface requires initializing multiple structs before you have usable objects. Pyverbs removes much of that overhead and provides a smoother experience.
+2. **Test suite for rdma-core.** New features can be tested before merge, and users and distributions get tests for new and existing features along with the means to write their own quickly.
+3. **Stay current with rdma-core.** Coverage of new features happens during development, with tests shipped alongside each feature.
+
+## Limitations
+
+Python manages memory on your behalf. Memory is allocated by pyverbs when needed (for example, a user buffer for a memory region). You can read and write that memory, but you cannot allocate or free it manually.
+
+## Installation
+
+<Tabs>
+  <Tab title="Build from source">
+    Pyverbs is built as part of rdma-core using CMake. It is enabled by default.
+
+    ```bash
+    cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo <path-to-rdma-core>
+    ninja
+    ```
+
+    To disable pyverbs during a build, pass `-DNO_PYVERBS=1` to CMake:
+
+    ```bash
+    cmake -GNinja -DNO_PYVERBS=1 <path-to-rdma-core>
+    ```
+
+    The compiled `.so` extension modules are written to the `pyverbs/` subdirectory of your build tree.
+  </Tab>
+  <Tab title="Distro package">
+    Most distributions ship pyverbs as a separate package:
+
+    ```bash
+    # Debian / Ubuntu
+    apt install python3-pyverbs
+
+    # Fedora / RHEL
+    dnf install python3-pyverbs
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  Pyverbs requires Python 3. Python 2 is not supported.
+</Note>
+
+## Available modules
+
+| Module | Description |
+|---|---|
+| `pyverbs.device` | Open devices, query attributes, allocate device memory |
+| `pyverbs.pd` | Protection domains and parent domains |
+| `pyverbs.mr` | Memory regions, memory windows, device-memory MRs |
+| `pyverbs.qp` | Queue pairs, QP capabilities, QP init attributes |
+| `pyverbs.cq` | Completion queues (CQ and CQEX) and completion channels |
+| `pyverbs.addr` | Address handles, GID, global route |
+| `pyverbs.cmid` | rdma_cm integration (CMID, AddrInfo) |
+| `pyverbs.flow` | Flow steering (FlowAttr, Flow) |
+| `pyverbs.spec` | Flow specs (EthSpec, IPv4, TCP/UDP, etc.) |
+| `pyverbs.srq` | Shared receive queues |
+| `pyverbs.xrcd` | Extended Reliable Connection domains |
+| `pyverbs.wr` | Work requests (SendWR, RecvWR, SGE) |
+| `pyverbs.wq` | Work queues and receive-WQ indirection tables |
+| `pyverbs.providers.mlx5.mlx5dv` | mlx5 provider extensions |
+
+## Subpages
+
+<CardGroup cols={3}>
+  <Card title="Devices and resources" href="/pyverbs/devices-and-resources">
+    Open a device, query attributes, create PDs, MRs, CQs, and more.
+  </Card>
+  <Card title="Queue pairs" href="/pyverbs/queue-pairs">
+    Create and configure QPs, post send operations, flow steering.
+  </Card>
+  <Card title="Provider extensions" href="/pyverbs/providers">
+    mlx5-specific QPs, CQs, DevX objects, VAR, PP, and UAR.
+  </Card>
+</CardGroup>

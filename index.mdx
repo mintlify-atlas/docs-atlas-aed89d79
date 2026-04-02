@@ -1,97 +1,102 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "rdma-core"
+description: "Userspace libraries and daemons for the Linux RDMA subsystem — enabling high-performance InfiniBand, iWARP, and RoCE networking from userspace."
 ---
 
-## Setting up
+rdma-core provides the complete userspace stack for Linux RDMA hardware. It includes the `libibverbs` C library for direct verbs access, `librdmacm` for connection management, Python bindings via `pyverbs`, hardware provider plugins for 18+ NIC families, and supporting daemons for production deployments.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get RDMA working in minutes with software emulation or real hardware.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Building from source" icon="hammer" href="/building">
+    Build and install rdma-core on Debian, Fedora, openSUSE, and more.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="libibverbs" icon="c" href="/libraries/libibverbs">
+    The core C library for direct RDMA verbs access from userspace.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Python Bindings" icon="python" href="/pyverbs/overview">
+    Use pyverbs to script RDMA operations and run the test suite.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Core libraries
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="libibverbs" icon="microchip" href="/libraries/libibverbs">
+    Direct verbs interface for InfiniBand and RoCE hardware. Create queue pairs, memory regions, completion queues, and more.
+  </Card>
+  <Card title="librdmacm" icon="network-wired" href="/libraries/librdmacm">
+    RDMA connection management library. Establish connections using familiar socket-like APIs over InfiniBand and iWARP.
+  </Card>
+  <Card title="libibumad" icon="server" href="/libraries/libibumad">
+    Userspace management datagram library for InfiniBand subnet management.
+  </Card>
+  <Card title="libibmad" icon="database" href="/libraries/libibmad">
+    InfiniBand Management Datagram (MAD) library for fabric management tools.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Hardware providers
 
-## Need inspiration?
+rdma-core includes userspace driver components for over 18 RDMA-capable NICs:
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<CardGroup cols={2}>
+  <Card title="Soft-RoCE (RXE) & SIW" icon="layer-group" href="/providers/soft-roce">
+    Run RDMA over standard Ethernet without special hardware using the software RoCE and SoftIWARP drivers.
+  </Card>
+  <Card title="Mellanox mlx4 & mlx5" icon="bolt" href="/providers/mlx4-mlx5">
+    High-performance provider support for ConnectX and BlueField families.
+  </Card>
+  <Card title="Other providers" icon="plug" href="/providers/other-providers">
+    EFA, irdma, hns, qedr, bnxt_re, and more NIC families supported.
+  </Card>
+  <Card title="Provider overview" icon="list" href="/providers/overview">
+    Full list of supported kernel drivers and their userspace provider counterparts.
+  </Card>
+</CardGroup>
+
+## Python bindings
+
+<CardGroup cols={2}>
+  <Card title="pyverbs overview" icon="python" href="/pyverbs/overview">
+    Install and use pyverbs for Pythonic RDMA access and testing.
+  </Card>
+  <Card title="Devices and resources" icon="memory" href="/pyverbs/devices-and-resources">
+    Open devices, allocate PDs, register MRs, and create CQs from Python.
+  </Card>
+  <Card title="Queue pairs" icon="arrows-left-right" href="/pyverbs/queue-pairs">
+    Create, modify, and use QPs to send and receive RDMA operations.
+  </Card>
+  <Card title="Provider extensions" icon="puzzle-piece" href="/pyverbs/providers">
+    mlx5-specific DevX, VAR, UAR, and extended QP interfaces.
+  </Card>
+</CardGroup>
+
+## Daemons and tools
+
+<CardGroup cols={2}>
+  <Card title="ibacm" icon="tower-broadcast" href="/daemons/ibacm">
+    InfiniBand Communication Manager assistant for address and route resolution.
+  </Card>
+  <Card title="Diagnostic tools" icon="stethoscope" href="/daemons/diag-tools">
+    ibstat, ibping, ibtracert, perfquery, and other fabric diagnostic utilities.
+  </Card>
+  <Card title="SRP daemon" icon="hard-drive" href="/daemons/srp-daemon">
+    Automatic discovery and connection to InfiniBand SCSI RDMA Protocol targets.
+  </Card>
+  <Card title="iwpmd" icon="ethernet" href="/daemons/iwpmd">
+    iWARP port mapper daemon for user-space iWARP connection setup.
+  </Card>
+</CardGroup>
+
+## API reference
+
+<CardGroup cols={2}>
+  <Card title="libibverbs API" icon="code" href="/api/device">
+    Complete reference for ibv_* functions: devices, PDs, MRs, QPs, CQs, and AHs.
+  </Card>
+  <Card title="librdmacm API" icon="sitemap" href="/api/rdmacm-overview">
+    rdma_* connection management function reference.
+  </Card>
+</CardGroup>

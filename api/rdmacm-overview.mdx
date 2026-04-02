@@ -1,0 +1,206 @@
+---
+title: "librdmacm overview"
+description: "RDMA connection management API overview and concepts"
+---
+
+The `librdmacm` library provides connection-oriented RDMA using standard IP addresses and port numbers rather than InfiniBand LIDs (Local IDentifiers) or GIDs directly. This allows RDMA applications to be written using familiar networking concepts while taking advantage of RDMA hardware capabilities for low-latency, high-bandwidth data transfers.
+
+The library works in conjunction with `libibverbs`, which provides the underlying send/receive verbs. `librdmacm` handles connection setup, address resolution, and event delivery; `libibverbs` handles the actual data path.
+
+<Note>
+  A single kernel device file at `/dev/infiniband/rdma_cm` is used regardless
+  of how many RDMA adapters or ports are present on the system.
+</Note>
+
+## The rdma_cm_id
+
+The central handle in librdmacm is `struct rdma_cm_id`. It is conceptually analogous to a socket file descriptor: it tracks the addressing, routing, queue pair (QP), and event state for a single connection or listening endpoint.
+
+```c
+struct rdma_cm_id {
+    struct ibv_context        *verbs;       /* RDMA device context */
+    struct rdma_event_channel *channel;     /* associated event channel */
+    void                      *context;     /* user-supplied context pointer */
+    struct ibv_qp             *qp;          /* associated queue pair */
+    struct rdma_route          route;       /* resolved address and route */
+    enum rdma_port_space       ps;          /* port space (TCP/UDP/IB) */
+    uint8_t                    port_num;    /* local port number */
+    struct ibv_pd             *pd;          /* protection domain */
+    enum ibv_qp_type           qp_type;     /* RC, UC, UD, etc. */
+    /* ... */
+};
+```
+
+Unlike a socket, an `rdma_cm_id` must be explicitly bound to a local RDMA device before communication can occur, because RDMA operations reference device-specific resources (protection domains, memory regions, queue pairs).
+
+## Port spaces
+
+The `rdma_port_space` enum controls what type of queue pair is created and how the connection is managed.
+
+| Value | Hex | QP type | Description |
+|-------|-----|---------|-------------|
+| `RDMA_PS_TCP` | `0x0106` | RC (Reliable Connected) | Connection-oriented, reliable in-order delivery. The most common choice for RDMA applications. |
+| `RDMA_PS_UDP` | `0x0111` | UD (Unreliable Datagram) | Connectionless, unreliable delivery. Lower overhead; no per-flow connection state. |
+| `RDMA_PS_IB` | `0x013F` | Raw IB | Direct InfiniBand port space without IP address mapping. |
+| `RDMA_PS_IPOIB` | `0x0002` | UD | IP over InfiniBand address space. |
+
+## Event-driven API
+
+librdmacm operations are asynchronous by default. Results of address resolution, route resolution, and connection establishment are delivered as events on an `rdma_event_channel`.
+
+### rdma_event_channel
+
+An event channel is a file descriptor-backed notification mechanism:
+
+```c
+struct rdma_event_channel {
+    int fd;   /* readable when events are available */
+};
+```
+
+Because the channel exposes a plain file descriptor, it integrates naturally with `poll(2)`, `epoll(7)`, and `select(2)`. Setting the descriptor to non-blocking mode (`O_NONBLOCK`) enables fully asynchronous event processing.
+
+### Synchronous mode
+
+If no event channel is passed to `rdma_create_id`, or if `rdma_create_ep` is used directly, the `rdma_cm_id` operates synchronously: calls like `rdma_connect` and `rdma_listen` block until they complete. This simplifies single-threaded programs.
+
+To switch a synchronous `rdma_cm_id` to asynchronous operation after creation, call `rdma_migrate_id` with a user-created event channel.
+
+### CM event types
+
+Events are retrieved with `rdma_get_cm_event` and must be acknowledged with `rdma_ack_cm_event` before the associated memory is freed.
+
+| Event | Triggered by |
+|-------|-------------|
+| `RDMA_CM_EVENT_ADDR_RESOLVED` | `rdma_resolve_addr` completed successfully |
+| `RDMA_CM_EVENT_ADDR_ERROR` | `rdma_resolve_addr` failed |
+| `RDMA_CM_EVENT_ROUTE_RESOLVED` | `rdma_resolve_route` completed successfully |
+| `RDMA_CM_EVENT_ROUTE_ERROR` | `rdma_resolve_route` failed |
+| `RDMA_CM_EVENT_CONNECT_REQUEST` | Server received a new inbound connection request |
+| `RDMA_CM_EVENT_CONNECT_RESPONSE` | Active side received a response (no QP on id) |
+| `RDMA_CM_EVENT_CONNECT_ERROR` | Error during connection setup |
+| `RDMA_CM_EVENT_ESTABLISHED` | Connection is fully established |
+| `RDMA_CM_EVENT_DISCONNECTED` | Connection has been disconnected |
+| `RDMA_CM_EVENT_REJECTED` | Connection request was rejected by the remote side |
+| `RDMA_CM_EVENT_UNREACHABLE` | Remote side unreachable |
+| `RDMA_CM_EVENT_DEVICE_REMOVAL` | Local RDMA device was removed; destroy the id |
+| `RDMA_CM_EVENT_TIMEWAIT_EXIT` | QP exited timewait state after disconnect |
+
+<Warning>
+  On receiving `RDMA_CM_EVENT_DEVICE_REMOVAL`, you must destroy the
+  associated `rdma_cm_id` and release all resources allocated with that device.
+</Warning>
+
+## Connection establishment flow
+
+The following shows the full asynchronous connection flow for both sides. For synchronous operation (using `rdma_create_ep`), the event channel calls are not needed.
+
+<Tabs>
+  <Tab title="Server (passive side)">
+    <Steps>
+      <Step title="Create event channel">
+        ```c
+        struct rdma_event_channel *ec = rdma_create_event_channel();
+        ```
+        Opens the file descriptor used to receive CM events.
+      </Step>
+      <Step title="Allocate a listening id">
+        ```c
+        struct rdma_cm_id *listen_id;
+        rdma_create_id(ec, &listen_id, NULL, RDMA_PS_TCP);
+        ```
+        Creates the server-side endpoint analogous to a socket before `bind`.
+      </Step>
+      <Step title="Bind to a local address and port">
+        ```c
+        struct sockaddr_in addr = { .sin_family = AF_INET,
+                                    .sin_port = htons(7471) };
+        rdma_bind_addr(listen_id, (struct sockaddr *)&addr);
+        ```
+        Associates the id with a specific local address. Wildcard addresses are permitted.
+      </Step>
+      <Step title="Start listening">
+        ```c
+        rdma_listen(listen_id, 0);
+        ```
+        Begins accepting inbound connection requests. The backlog argument controls the queue depth.
+      </Step>
+      <Step title="Wait for a connection request">
+        ```c
+        struct rdma_cm_event *event;
+        rdma_get_cm_event(ec, &event);
+        /* event->event == RDMA_CM_EVENT_CONNECT_REQUEST */
+        struct rdma_cm_id *conn_id = event->id;
+        rdma_ack_cm_event(event);
+        ```
+        A new `rdma_cm_id` for the inbound connection is delivered via the event.
+      </Step>
+      <Step title="Create a QP and accept">
+        ```c
+        rdma_create_qp(conn_id, pd, &qp_init_attr);
+        rdma_accept(conn_id, NULL);
+        ```
+        Allocates a queue pair on the new id and accepts the connection.
+      </Step>
+      <Step title="Wait for ESTABLISHED">
+        ```c
+        rdma_get_cm_event(ec, &event);
+        /* event->event == RDMA_CM_EVENT_ESTABLISHED */
+        rdma_ack_cm_event(event);
+        ```
+        The connection is now ready for data transfer.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="Client (active side)">
+    <Steps>
+      <Step title="Create event channel">
+        ```c
+        struct rdma_event_channel *ec = rdma_create_event_channel();
+        ```
+      </Step>
+      <Step title="Allocate a cm id">
+        ```c
+        struct rdma_cm_id *id;
+        rdma_create_id(ec, &id, NULL, RDMA_PS_TCP);
+        ```
+      </Step>
+      <Step title="Resolve the destination address">
+        ```c
+        rdma_resolve_addr(id, NULL, dst_addr, 2000 /* ms */);
+        ```
+        Maps the destination IP address to an RDMA device and binds the local side. Wait for `RDMA_CM_EVENT_ADDR_RESOLVED`.
+      </Step>
+      <Step title="Resolve the route">
+        ```c
+        rdma_resolve_route(id, 2000 /* ms */);
+        ```
+        Determines the fabric route (path record on IB). Wait for `RDMA_CM_EVENT_ROUTE_RESOLVED`.
+      </Step>
+      <Step title="Create a QP and connect">
+        ```c
+        rdma_create_qp(id, pd, &qp_init_attr);
+        rdma_connect(id, NULL);
+        ```
+        Sends a connection request to the server. Wait for `RDMA_CM_EVENT_ESTABLISHED`.
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## rsocket API
+
+librdmacm also ships an rsocket layer (`librspreload`) that provides a socket-compatible interface over RDMA. Applications can use standard `send(2)` / `recv(2)` / `poll(2)` calls with rsocket file descriptors, gaining RDMA performance without any source-level changes beyond linking against rsockets or using `LD_PRELOAD`.
+
+The rsocket API is documented separately in `rsocket(7)`.
+
+## Return codes
+
+Most librdmacm functions return `0` on success and `-1` on failure, setting `errno` to indicate the reason. For asynchronous operations, a return of `0` means the operation was successfully initiated; the actual result is delivered as a CM event with a `status` field.
+
+<Note>
+  Older versions of the library returned `-errno` directly and did not set
+  `errno` for some error codes (`ENOMEM`, `ENODEV`, `ENODATA`, `EINVAL`,
+  `EADDRNOTAVAIL`). Applications needing compatibility with older releases
+  should manually set `errno` to the negation of a return value less than `-1`.
+</Note>

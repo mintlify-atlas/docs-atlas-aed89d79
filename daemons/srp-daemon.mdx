@@ -1,0 +1,207 @@
+---
+title: SRP daemon
+description: Automatic discovery of InfiniBand SRP storage targets
+---
+
+The SRP daemon (`srp_daemon`) discovers InfiniBand SCSI RDMA Protocol (SRP) targets and connects them to the local host through the `ib_srp` kernel module. This makes remote storage accessible over InfiniBand as if it were locally attached block storage.
+
+## Overview
+
+SCSI RDMA Protocol (SRP) enables accessing remote storage targets over InfiniBand using RDMA transfers. Linux kernels 2.6.15 and newer include the `ib_srp` initiator module, which handles connections to SRP targets once they have been discovered and registered.
+
+The discovery tools in this package are:
+
+- **srp_daemon**: a persistent daemon that monitors the fabric for SRP targets and connects to them automatically
+- **ibsrpdm**: a one-shot utility for manually listing and connecting to SRP targets
+
+Both tools require the `ib_umad` module and an appropriate low-level IB driver to be loaded.
+
+## ibsrpdm
+
+`ibsrpdm` performs a single scan of the fabric and displays the SRP targets it finds.
+
+### Listing targets
+
+With no arguments, `ibsrpdm` displays target information in human-readable form:
+
+```bash
+ibsrpdm
+```
+
+Example output:
+
+```
+IO Unit Info:
+    port LID:        0009
+    port GID:        fe800000000000000005ad00000013e9
+    change ID:       73b0
+    max controllers: 0x01
+
+    controller[  1]
+        GUID:      0005ad00000013e7
+        vendor ID: 0005ad
+        device ID: 0005ad
+        IO class : 0100
+        ID:        Topspin SRP/FC TCA
+        service entries: 2
+            service[  0]: 0000000000000066 / SRP.T10:20030003BA27CC7A
+            service[  1]: 0000000000000066 / SRP.T10:20030003BA27CF53
+```
+
+### Generating connection strings
+
+Use the `-c` flag to generate output in the format expected by the `ib_srp` kernel initiator's `add_target` sysfs file:
+
+```bash
+ibsrpdm -c
+```
+
+Example output:
+
+```
+id_ext=20030003BA27CC7A,ioc_guid=0005ad00000013e7,dgid=fe800000000000000005ad00000013e9,pkey=ffff,service_id=0000000000000066
+id_ext=20030003BA27CF53,ioc_guid=0005ad00000013e7,dgid=fe800000000000000005ad00000013e9,pkey=ffff,service_id=0000000000000066
+```
+
+### Connecting to a target manually
+
+Write one of the connection strings to the initiator's `add_target` file to connect. For example, to connect via port 1 of device `mthca0`:
+
+```bash
+echo -n "id_ext=20030003BA27CC7A,ioc_guid=0005ad00000013e7,dgid=fe800000000000000005ad00000013e9,pkey=ffff,service_id=0000000000000066" \
+  > /sys/class/infiniband_srp/srp-mthca0-1/add_target
+```
+
+**ibsrpdm options:**
+
+| Flag | Description |
+|------|-------------|
+| `-c` | Generate connection strings for `add_target` |
+| `-d DEVICE` | Use the specified umad device (default: `/dev/infiniband/umad0`) |
+| `-k P_KEY` | Use the specified IB partition key (default: `0xffff`) |
+| `-v` | Verbose output |
+
+## srp_daemon
+
+`srp_daemon` is a persistent service that monitors the fabric and connects to SRP targets automatically. Each instance operates on one local IB port.
+
+On startup, `srp_daemon` performs a full rescan of the fabric. It then waits for events:
+
+- **New machine joins the fabric**: checks if the machine is an SRP target
+- **Capability change**: checks if the machine has become an SRP target
+- **SA change or timeout expiration**: performs a full rescan
+
+### Usage
+
+```bash
+# Monitor port 1 of mthca0, rescan every 60 seconds, connect automatically
+srp_daemon -e -i mthca0 -p 1 -R 60
+
+# Print connection commands for all targets and exit (like ibsrpdm)
+srp_daemon -o -c -a
+
+# Connect using targets allowed by a custom rules file
+srp_daemon -e -f /etc/srp_daemon_custom.conf
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `-i infiniband-device` | Work on the specified IB device |
+| `-p port-num` | Work on the specified port (default: 1, use with `-i`) |
+| `-j dev:port` | Work on a specific device and port in `dev:port` format |
+| `-d umad-device` | Use the specified umad device file |
+| `-c` | Generate output for `add_target` instead of connecting |
+| `-a` | Print all targets, including already-connected ones |
+| `-e` | Execute connections (write to `add_target`) |
+| `-o` | Perform one rescan and exit |
+| `-R rescan-time` | Force a full rescan every N seconds |
+| `-T retry-timeout` | Retry connecting to existing targets after N seconds (default: 5) |
+| `-f rules-file` | Use the specified rules file (default: `/etc/srp_daemon.conf`) |
+| `-t timeout` | MAD response timeout in milliseconds (default: 5000) |
+| `-r retries` | Number of MAD send retries (default: 3) |
+| `-v` | Verbose output |
+| `-V` | Debug-level verbose output |
+| `-n` | New format: include `initiator_ext` in connection commands |
+| `--systemd` | Enable systemd integration |
+
+## Configuration
+
+### srp_daemon.conf
+
+The rules configuration file controls which SRP targets `srp_daemon` connects to. Each line is a rule starting with `a` (allow) or `d` (deny), followed by optional matching criteria.
+
+Rules are evaluated in order. The first matching rule applies. If no rule matches, the target is allowed.
+
+```bash
+# Allow rules support setting connection attributes
+# Deny all targets on a specific GID
+d       dgid=fe800000000000000002c90200402bd5
+
+# Allow a specific target by IOC GUID
+a       ioc_guid=00a0b80200402bd7
+
+# Allow a specific target with attributes
+a       id_ext=200500A0B81146A1,ioc_guid=00a0b80200402bef,max_cmd_per_lun=31
+
+# Allow all targets with a queue size of 128
+a       queue_size=128,max_cmd_per_lun=128
+
+# Deny everything else
+d
+```
+
+Matching fields: `id_ext`, `ioc_guid`, `dgid`, `service_id`, `pkey`
+
+Connection attributes (allow rules only): `max_cmd_per_lun`, `max_sect`, `queue_size`
+
+## Automatic target connection workflow
+
+<Steps>
+  <Step title="Load required kernel modules">
+    ```bash
+    modprobe ib_umad
+    modprobe ib_srp
+    ```
+  </Step>
+  <Step title="Verify IB hardware is available">
+    ```bash
+    ibstat
+    ```
+  </Step>
+  <Step title="Configure connection rules">
+    Edit `/etc/srp_daemon.conf` to allow or deny specific targets. The default configuration allows all targets.
+  </Step>
+  <Step title="Start the daemon">
+    <Tabs>
+      <Tab title="systemd (per-port)">
+        The `srp_daemon_port@` template unit starts a daemon instance for each port:
+
+        ```bash
+        systemctl start srp_daemon_port@mlx5_0:1
+        systemctl enable srp_daemon_port@mlx5_0:1
+        ```
+      </Tab>
+      <Tab title="systemd (all ports)">
+        ```bash
+        systemctl start srp_daemon
+        systemctl enable srp_daemon
+        ```
+      </Tab>
+      <Tab title="Direct">
+        ```bash
+        srp_daemon -e -i mlx5_0 -p 1 -R 60
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+  <Step title="Verify targets are connected">
+    After the daemon connects to targets, they appear as block devices:
+
+    ```bash
+    lsscsi          # list SCSI devices including SRP targets
+    ls /dev/sd*     # list new block devices
+    ```
+  </Step>
+</Steps>

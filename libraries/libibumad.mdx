@@ -1,0 +1,181 @@
+---
+title: "libibumad"
+description: "Userspace management datagram library"
+---
+
+libibumad provides a userspace interface for sending and receiving InfiniBand Management Datagrams (MADs) through kernel character device files at `/dev/infiniband/umadX`. It is the low-level foundation used by fabric management tools including the InfiniBand diagnostic utilities (`infiniband-diags`), subnet managers, and performance monitoring applications.
+
+## Device files
+
+Each InfiniBand port exposes a umad device node. The ABI version is published at:
+
+```
+/sys/class/infiniband_mad/abi_version
+```
+
+Individual device attributes are found under:
+
+```
+/sys/class/infiniband_mad/
+```
+
+The library also uses sysfs information from `/sys/class/infiniband/` to enumerate CA attributes and port state.
+
+<Warning>
+Sending and receiving MADs requires privileged access. Most operations on `/dev/infiniband/umadX` need either `CAP_NET_ADMIN` or root privileges. Running fabric management tools as an unprivileged user will fail at the port open step.
+</Warning>
+
+## Use cases
+
+- **Subnet management** — subnet managers (such as OpenSM) use libibumad to send Subnet Management Packets (SMPs) to query and configure switch forwarding tables, port states, and LID assignments.
+- **Fabric diagnostics** — tools such as `ibstat`, `ibstatus`, `ibroute`, `ibping`, and `perfquery` use libibumad (through libibmad) to query node information, port counters, and path records.
+- **Performance monitoring** — performance management agents send General Services Interface (GSI) MADs to collect port counters from HCAs and switches.
+
+## Key API functions
+
+### Initialization
+
+```c
+#include <infiniband/umad.h>
+
+int umad_init(void);
+int umad_done(void);
+```
+
+`umad_init` initializes the library and checks the ABI version. Call it once before using any other umad functions. `umad_done` releases library-wide resources.
+
+### Port enumeration
+
+```c
+int umad_get_cas_names(char cas[][UMAD_CA_NAME_LEN], int max);
+int umad_get_ca(const char *ca_name, umad_ca_t *ca);
+int umad_release_ca(umad_ca_t *ca);
+int umad_get_port(const char *ca_name, int portnum, umad_port_t *port);
+int umad_release_port(umad_port_t *port);
+```
+
+`umad_get_cas_names` fills a list of channel adapter names (e.g., `mlx5_0`). `umad_get_ca` populates a `umad_ca_t` structure with firmware version, hardware version, node GUID, system GUID, and per-port information. Always call `umad_release_ca` after `umad_get_ca` to free internal allocations.
+
+### Opening and closing ports
+
+```c
+int umad_open_port(const char *ca_name, int portnum);
+int umad_open_smi_port(const char *ca_name, int portnum);
+int umad_close_port(int portid);
+```
+
+`umad_open_port` opens the GSI (General Services Interface) port for a given CA and port number. Pass `NULL` for `ca_name` to use the first available CA, or `UMAD_ANY_PORT` (0) for `portnum` to use the first active port. Returns a non-negative port file descriptor on success, or a negative value on error.
+
+`umad_open_smi_port` opens the SMI (Subnet Management Interface) port instead, which is required for sending directed-route SMPs.
+
+### Registering management classes
+
+Before sending or receiving MADs, register the management class your agent handles:
+
+```c
+int umad_register(int portid, int mgmt_class, int mgmt_version,
+                  uint8_t rmpp_version, long method_mask[16 / sizeof(long)]);
+
+int umad_register2(int port_fd, struct umad_reg_attr *attr, uint32_t *agent_id);
+
+int umad_unregister(int portid, int agentid);
+```
+
+`umad_register` returns an agent ID used in subsequent send and receive calls. `umad_register2` is the newer interface and accepts a `umad_reg_attr` struct with extended options including RMPP support flags.
+
+### Sending and receiving MADs
+
+```c
+int umad_send(int portid, int agentid, void *umad, int length,
+              int timeout_ms, int retries);
+
+int umad_recv(int portid, void *umad, int *length, int timeout_ms);
+
+int umad_poll(int portid, int timeout_ms);
+int umad_get_fd(int portid);
+```
+
+`umad_send` transmits a MAD. The `umad` buffer must be allocated with `umad_alloc` and include the `ib_user_mad_t` header followed by the MAD payload. Set the destination address fields in the `ib_mad_addr_t` embedded in the header before calling send.
+
+`umad_recv` blocks until a MAD is received or `timeout_ms` milliseconds elapse. Pass `-1` for `timeout_ms` to block indefinitely.
+
+`umad_get_fd` returns the underlying file descriptor, which can be used with `select` or `poll` for non-blocking I/O.
+
+### Address helpers
+
+```c
+int umad_set_addr(void *umad, int dlid, int dqp, int sl, int qkey);
+int umad_set_grh(void *umad, void *mad_addr);
+int umad_set_pkey(void *umad, int pkey_index);
+```
+
+These helpers fill in the `ib_mad_addr_t` fields of a umad buffer before sending.
+
+### Memory management
+
+```c
+void *umad_alloc(int num, size_t size);
+void  umad_free(void *umad);
+void *umad_get_mad(void *umad);
+size_t umad_size(void);
+```
+
+`umad_alloc` allocates one or more zeroed MAD buffers. The total size of each buffer is `umad_size() + mad_payload_size`. `umad_get_mad` returns a pointer to the MAD payload within an allocated umad buffer.
+
+## Basic usage example
+
+```c
+#include <infiniband/umad.h>
+#include <infiniband/mad.h>
+#include <stdio.h>
+
+int main(void)
+{
+    umad_ca_t ca;
+    int portid, agentid;
+
+    /* Initialize library */
+    if (umad_init() < 0) {
+        perror("umad_init");
+        return 1;
+    }
+
+    /* Open first active port on first CA */
+    portid = umad_open_port(NULL, 0);
+    if (portid < 0) {
+        perror("umad_open_port");
+        return 1;
+    }
+
+    /* Register for subnet management class (SMP) */
+    agentid = umad_register(portid, IB_SMI_CLASS, 1, 0, NULL);
+    if (agentid < 0) {
+        perror("umad_register");
+        umad_close_port(portid);
+        return 1;
+    }
+
+    /* Allocate a MAD buffer */
+    uint8_t *umad_buf = umad_alloc(1, umad_size() + IB_MAD_SIZE);
+    if (!umad_buf) {
+        perror("umad_alloc");
+        goto cleanup;
+    }
+
+    /*
+     * Fill in destination address, set MAD fields,
+     * call umad_send / umad_recv as needed.
+     */
+
+    umad_free(umad_buf);
+cleanup:
+    umad_unregister(portid, agentid);
+    umad_close_port(portid);
+    umad_done();
+    return 0;
+}
+```
+
+## Integration with infiniband-diags
+
+The `infiniband-diags` package tools (`ibstat`, `ibroute`, `ibping`, `perfquery`, `ibswitches`, etc.) are built on libibumad (via libibmad). They demonstrate real-world usage patterns for port enumeration, SMP and GSI MAD construction, and result parsing. The source for these tools is in the `infiniband-diags/` directory of the rdma-core repository.

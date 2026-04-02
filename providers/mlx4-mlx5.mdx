@@ -1,0 +1,96 @@
+---
+title: "Mellanox mlx4 and mlx5 providers"
+description: "Provider support for Mellanox ConnectX and BlueField RDMA adapters"
+---
+
+rdma-core includes two Mellanox providers: `mlx4` for older ConnectX-3 hardware and `mlx5` for ConnectX-4 and all later generations including BlueField DPUs. Both providers support the standard libibverbs API. The mlx5 provider additionally exposes an extended direct-verbs (DV) API for advanced hardware features.
+
+## mlx4 — ConnectX-3
+
+The `mlx4` provider (`providers/mlx4/`) pairs with the `mlx4_ib` kernel module and supports:
+
+- **Hardware:** Mellanox ConnectX-3, ConnectX-3 Pro
+- **Transport:** InfiniBand and RoCE (Ethernet)
+- **API:** Standard libibverbs (`ibv_*`) verbs
+
+### Capabilities
+
+- Reliable Connected (RC) and Unreliable Datagram (UD) QPs
+- Send, RDMA Read, RDMA Write, and Atomic operations
+- Shared Receive Queues (SRQ)
+- Memory registration and memory windows
+- Extended verbs via the `mlx4dv_*` API for direct hardware access
+
+### Loading the driver
+
+```bash
+modprobe mlx4_ib
+```
+
+### Verifying
+
+```bash
+ibv_devinfo -d mlx4_0
+```
+
+## mlx5 — ConnectX-4 and later
+
+The `mlx5` provider (`providers/mlx5/`) pairs with the `mlx5_ib` kernel module. It supports every ConnectX generation from ConnectX-4 onward and all BlueField DPU variants.
+
+- **Hardware:** ConnectX-4, ConnectX-5, ConnectX-6, ConnectX-6 Dx/Ex, ConnectX-7, BlueField-2, BlueField-3
+- **Transport:** InfiniBand and RoCE (Ethernet)
+- **API:** Standard libibverbs (`ibv_*`) plus the extended `mlx5dv_*` API
+
+### Extended DV API (mlx5dv)
+
+The `mlx5dv_*` functions in `mlx5dv.h` expose hardware features not covered by the standard verbs API. You access them by including `<infiniband/mlx5dv.h>` and linking against `libmlx5`.
+
+### DC QPs — Dynamically Connected transport
+
+mlx5 supports two Dynamically Connected (DC) QP types that reduce the number of QPs needed for all-to-all communication patterns:
+
+| Type | Description |
+|---|---|
+| DCI | DC Initiator — sends requests to DCT targets |
+| DCT | DC Target — receives requests from any DCI |
+
+A single DCT can accept connections from many DCIs without maintaining per-peer state, making DC QPs well suited to large clusters.
+
+### Raw Packet QPs
+
+Raw Packet QPs give applications full control over the packet header and payload. The application constructs the complete Ethernet frame (including IP and UDP headers for RoCE) and the hardware sends it without modification. This is useful for network telemetry, custom protocols, and packet generators.
+
+### DevX — direct firmware access
+
+The DevX interface (`mlx5dv_devx_*` functions) allows userspace to send commands directly to the device firmware using the hardware's native command interface. This bypasses the kernel driver abstraction and enables features not yet surfaced in the standard verbs API.
+
+### Other notable mlx5 capabilities
+
+<AccordionGroup>
+  <Accordion title="CQE compression">
+    The hardware can compress multiple Completion Queue Entries (CQEs) into a single cache line when consecutive completions share attributes. This reduces PCIe bandwidth consumption on high-message-rate workloads. Controlled via `MLX5DV_CONTEXT_MASK_CQE_COMPRESION`.
+  </Accordion>
+  <Accordion title="Striding RQ">
+    A Striding Receive Queue allows a single receive Work Request to span multiple message strides in memory, reducing the number of WRs the application must post for small or variable-size messages. Controlled via `MLX5DV_CONTEXT_MASK_STRIDING_RQ`.
+  </Accordion>
+  <Accordion title="Tunnel offloads">
+    The hardware can parse and offload tunneled packets (VXLAN, GRE, etc.) for RSS and checksum operations. Controlled via `MLX5DV_CONTEXT_MASK_TUNNEL_OFFLOADS`.
+  </Accordion>
+  <Accordion title="Software steering (dr_*)">
+    The `dr_*` source files implement a userspace steering engine that programs the hardware's flow table directly, enabling high-performance packet classification and forwarding without kernel involvement.
+  </Accordion>
+</AccordionGroup>
+
+### Loading the driver
+
+```bash
+modprobe mlx5_ib
+```
+
+### Verifying
+
+```bash
+ibv_devinfo -d mlx5_0
+```
+
+The output includes the firmware version, port state, active MTU, and supported transport types.

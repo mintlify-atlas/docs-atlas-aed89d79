@@ -1,0 +1,222 @@
+---
+title: ibacm
+description: InfiniBand Communication Manager assistant for address and route resolution
+---
+
+The IB ACM implements and provides a framework for name, address, and route (path) resolution services over InfiniBand. It is intended to address connection setup scalability issues when running MPI applications on large clusters. The IB ACM provides information needed to establish a connection, but does not implement the CM protocol itself.
+
+IB ACM services are used by `librdmacm` to implement the `rdma_resolve_addr`, `rdma_resolve_route`, and `rdma_getaddrinfo` routines. Applications using `librdmacm` 1.0.16 or newer automatically use ibacm without code changes.
+
+## Overview
+
+The IB ACM is focused on being scalable, efficient, and extensible. It implements a plugin architecture that allows vendors to supply proprietary providers in addition to the default provider. The current default provider (`ibacmp`) limits network traffic, SA interactions, and centralized services, and supports multiple resolution protocols to handle different fabric topologies.
+
+The IB ACM package is comprised of three components:
+
+- **ibacm**: the core daemon service
+- **ibacmp**: the default provider shared library
+- **ib_acme**: a test and configuration utility
+
+## Architecture
+
+### How ibacm works
+
+Conceptually, ibacm implements an ARP-like protocol. Depending on the selected route protocol, it either:
+
+- Queries the SA directly for path records (the default behavior), or
+- Uses IB multicast records to construct path record data
+
+All IB endpoints join a number of multicast groups. These groups differ based on rate, MTU, service level, and similar attributes, and are prioritized. All participating endpoints must be able to communicate on the lowest-priority multicast group.
+
+When a client requests resolution of a destination name or address that is not cached locally, ibacm sends a multicast request out on the lowest-priority multicast group on the local endpoint. The request carries a list of multicast groups that the sender supports. The recipient selects the highest-priority group it can use and returns that information directly to the sender. The request data is cached by all endpoints that receive the multicast message.
+
+The client interface is implemented over TCP sockets, abstracted by the `librdmacm` library.
+
+## Components
+
+### ibacm service
+
+The ibacm daemon resolves names and addresses to InfiniBand path information and caches that data. It runs with administrative privileges and exposes a TCP socket interface consumed by `librdmacm`.
+
+```bash
+# Run ibacm as a daemon (default mode)
+ibacm
+
+# Run ibacm as a foreground process
+ibacm -P
+
+# Specify custom configuration files
+ibacm -A /etc/ibacm/ibacm_addr.cfg -O /etc/ibacm/ibacm_opts.cfg
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `-D` | Run in daemon mode (default) |
+| `-P` | Run as a standard process (foreground) |
+| `-A addr_file` | Specify an address configuration file |
+| `-O option_file` | Specify an options configuration file |
+| `--systemd` | Enable systemd integration, including socket activation |
+
+### ib_acme
+
+The `ib_acme` program serves two roles:
+
+1. **Testing**: Verifies that ibacm is running and that the selected protocol is usable for the given cluster configuration.
+2. **Configuration**: Automatically generates `ibacm_addr.cfg` and `ibacm_opts.cfg` to assist with or eliminate manual setup.
+
+```bash
+# Resolve a destination by IP address and verify against the SA
+ib_acme -d 192.168.1.10 -v
+
+# Generate address and options configuration files
+ib_acme -A -O
+
+# Enumerate all endpoints registered with the local ibacm daemon
+ib_acme -e
+
+# Query performance data from the local ibacm daemon
+ib_acme -P
+
+# Resolve multiple destinations using range syntax
+ib_acme -d node[1-3,5,7-8]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `-f addr_format` | Address format: `i` (IP), `n` (name), `l` (LID), `g` (GID), `u` (auto) |
+| `-s src_addr` | Source address for path resolution |
+| `-d dest_addr` | Destination address to resolve |
+| `-v` | Verify resolved path against the active IB SA |
+| `-c` | Return only information present in the local cache |
+| `-e [N]` | Display one or all endpoints |
+| `-P [opt]` | Query performance data (`col`, `all`, `N`, or `s`) |
+| `-A [addr_file]` | Generate address configuration file |
+| `-O [opt_file]` | Generate options configuration file |
+| `-D dest_dir` | Destination directory for generated files |
+| `-S svc_addr` | Hostname, IPv4 address, or Unix socket of ACM service |
+| `-C repetitions` | Number of resolution repetitions (for benchmarking) |
+
+## Configuration files
+
+### ibacm_addr.cfg
+
+Contains name and address mappings for each `<device, port, pkey>` endpoint. The `ib_acme` utility generates this file automatically, mapping the system hostname and IP addresses to IB endpoints.
+
+```
+# Format: name/address  device  port  pkey
+192.168.1.10            mlx5_0  1     0xffff
+hostname.example.com    mlx5_0  1     0xffff
+```
+
+IP addresses are assigned dynamically. If the file cannot be found, ibacm attempts to create one using default values. Up to 4 addresses can be assigned to a single endpoint.
+
+### ibacm_opts.cfg
+
+Provides configurable options for the ibacm core service and default provider, including timeout, retry count, logging level, and route protocol selection. Generated by `ib_acme -O`.
+
+Key options include:
+
+| Option | Description |
+|--------|-------------|
+| `timeout` | MAD response timeout in milliseconds |
+| `retries` | Number of retries per MAD send |
+| `log_level` | Verbosity of daemon logging |
+| `route_preload` | Set to `full_opensm_v1` to preload path record caches from OpenSM |
+| `addr_preload` | Set to `acm_hosts` to preload name and IP caches |
+| `addr_data_file` | Path to the hosts file used when `addr_preload=acm_hosts` |
+
+### Preloading caches
+
+The ibacm service maintains internal caches for GID and LID destination addresses, as well as name and IP caches. These can optionally be preloaded to reduce initial resolution latency.
+
+To preload route caches from OpenSM's `dump_pr` plugin output:
+
+```ini
+# In ibacm_opts.cfg
+route_preload = full_opensm_v1
+```
+
+To preload name and address caches from a hosts file:
+
+```ini
+addr_preload = acm_hosts
+addr_data_file = /etc/ibacm/ibacm_hosts.data
+```
+
+## Starting ibacm
+
+<Steps>
+  <Step title="Verify prerequisites">
+    Ensure `libibverbs` and `libibumad` are installed, and the IB stack is running with IPoIB configured.
+
+    ```bash
+    ibstat        # verify IB devices are present and active
+    ```
+  </Step>
+  <Step title="Generate configuration files">
+    Use `ib_acme` to automatically generate configuration files based on the current system:
+
+    ```bash
+    ib_acme -A -O -D /etc/ibacm
+    ```
+  </Step>
+  <Step title="Start the daemon">
+    <Tabs>
+      <Tab title="systemd">
+        ```bash
+        systemctl start ibacm
+        systemctl enable ibacm   # enable at boot
+        ```
+      </Tab>
+      <Tab title="Direct">
+        ```bash
+        ibacm
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+  <Step title="Verify operation">
+    Use `ib_acme` to test that the service is resolving addresses correctly:
+
+    ```bash
+    # Resolve a destination and verify the result against the SA
+    ib_acme -d <dest_ip> -v
+
+    # List all registered endpoints
+    ib_acme -e
+
+    # Check performance statistics
+    ib_acme -P
+    ```
+  </Step>
+  <Step title="Install librdmacm">
+    Install `librdmacm` 1.0.16 or newer. It will automatically use ibacm for address and route resolution. On resolution failures, librdmacm falls back to standard SA queries.
+  </Step>
+</Steps>
+
+## Server mode build options
+
+The `IBACM_SERVER_MODE` build option controls how the ibacm daemon exposes its listening socket:
+
+| Mode | Description |
+|------|-------------|
+| `unix` | Unix-domain socket only; accessible only to local processes |
+| `loop` | Loopback TCP socket; accessible only on `127.0.0.1` |
+| `open` | TCP socket on all interfaces; allows remote clients |
+
+The default mode is `unix`. Use `open` only in trusted network environments.
+
+## Current limitations
+
+<Note>
+The following limitations apply to the current ibacmp provider implementation:
+
+- ibacm has limited handling of dynamic fabric changes. If the cluster is reconfigured, ibacm must be stopped and restarted.
+- Support for IPv6 has not been verified.
+- The number of multicast groups that an endpoint can support is limited to 2.
+- The multicast resolution protocol is not usable on all fabric topologies, specifically those with non-reversible paths or torus routing. Use `ib_acme` to verify compatibility before deploying multicast-based resolution.
+</Note>

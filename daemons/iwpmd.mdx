@@ -1,0 +1,154 @@
+---
+title: iwpmd
+description: iWARP port mapper daemon
+---
+
+The iWARP Port Mapper Daemon (`iwpmd`) provides a userspace port mapping service for iWARP kernel drivers. It allows iWARP RDMA providers to claim TCP ports through the standard socket interface, preventing collisions with native TCP applications.
+
+## Overview
+
+iWARP RDMA providers use the same IP address as the native TCP/IP stack when creating RDMA connections. They need a mechanism to claim the TCP ports used for RDMA connections so that those ports are not also bound by other host applications using the native TCP stack.
+
+Without `iwpmd`, an RDMA application could bind or listen on a port already in use by a native TCP application. When this happens, incoming TCP connection data may be incorrectly routed to the RDMA stack, causing errors.
+
+The iWARP Port Mapper implementation follows the port mapper specification in the Sockets Direct Protocol (SDP).
+
+## How it works
+
+When an iWARP RDMA connection is being set up:
+
+1. The iWARP Connection Manager (a kernel-space port mapper client) sends the local IP address and TCP port to `iwpmd` via a netlink socket.
+2. `iwpmd` performs a `bind()` from userspace to reserve an available TCP port (the "mapped port").
+3. The mapped port is communicated back to the kernel client.
+4. The RDMA connection uses the mapped port, which is now visible to the native TCP stack as taken.
+5. When the RDMA connection is terminated, the kernel client notifies `iwpmd`, which releases the port.
+
+The message exchange between `iwpmd` and the iWARP Connection Manager is implemented using netlink sockets. The kernel-side support for the port mapper is part of the `iw_cm` module, and netlink support is part of `ib_core`.
+
+## Prerequisites
+
+Both `iw_cm` and `ib_core` kernel modules must be loaded before `iwpmd` can start successfully:
+
+```bash
+modprobe ib_core
+modprobe iw_cm
+```
+
+## Supported iWARP providers
+
+`iwpmd` supports any iWARP RDMA provider that uses the `iw_cm` kernel module for connection management, including:
+
+- `cxgb4` (Chelsio T4/T5/T6 adapters)
+- `irdma` (Intel Ethernet RDMA adapters)
+- Other providers using the iWARP Connection Manager interface
+
+## Configuration
+
+### iwpmd.conf
+
+The configuration file at `/etc/iwpmd.conf` accepts the following option:
+
+```bash
+# Netlink socket receive buffer size in bytes (default: 419430400)
+nl_sock_rbuf_size=419430400
+```
+
+Increase `nl_sock_rbuf_size` if you observe dropped netlink messages under high connection rates.
+
+## Starting iwpmd
+
+<Steps>
+  <Step title="Verify kernel modules are loaded">
+    ```bash
+    lsmod | grep ib_core
+    lsmod | grep iw_cm
+    ```
+
+    Load them if needed:
+
+    ```bash
+    modprobe ib_core
+    modprobe iw_cm
+    ```
+  </Step>
+  <Step title="Start the daemon">
+    <Tabs>
+      <Tab title="systemd">
+        ```bash
+        systemctl start iwpmd
+        systemctl enable iwpmd   # start at boot
+        ```
+      </Tab>
+      <Tab title="Direct">
+        ```bash
+        iwpmd
+        ```
+
+        Use `--systemd` to enable systemd integration when running under a service manager:
+
+        ```bash
+        iwpmd --systemd
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+  <Step title="Verify the service is running">
+    ```bash
+    systemctl status iwpmd
+    ```
+  </Step>
+</Steps>
+
+## Signals
+
+| Signal | Effect |
+|--------|--------|
+| `SIGUSR1` | Dumps current port mappings to the system message log |
+| `SIGTERM` | Causes `iwpmd` to exit |
+| `SIGHUP` | Causes `iwpmd` to exit |
+
+To dump active mappings for debugging:
+
+```bash
+kill -USR1 $(pidof iwpmd)
+journalctl -u iwpmd --since "1 minute ago"
+```
+
+## Debugging connection issues
+
+<Note>
+`iwpmd` must be running before any iWARP RDMA applications attempt to create connections. If `iwpmd` is not running, iWARP connections may fail or collide with native TCP ports.
+</Note>
+
+**Check that port mapping is active:**
+
+```bash
+# Confirm iwpmd is running
+systemctl status iwpmd
+
+# Dump current mappings to the log
+kill -USR1 $(pidof iwpmd)
+journalctl -u iwpmd -n 50
+```
+
+**Check for missing kernel modules:**
+
+```bash
+dmesg | grep -i "iw_cm\|ib_core"
+lsmod | grep -E "ib_core|iw_cm|cxgb4|irdma"
+```
+
+**Verify the iWARP provider is loaded:**
+
+```bash
+rdma link show
+```
+
+## Build options
+
+`iwpmd` is built by default when `ENABLE_RESOLVE_NEIGH` is enabled in the CMake configuration. This is the default for most distributions. To check whether `iwpmd` is included in the installed package:
+
+```bash
+which iwpmd
+iwpmd --help
+```

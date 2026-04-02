@@ -1,0 +1,57 @@
+---
+title: "Hardware provider overview"
+description: "Userspace provider plugins for RDMA hardware"
+---
+
+Providers are userspace shared libraries that pair with kernel RDMA drivers. Each provider implements the low-level hardware operations that libibverbs exposes through its standard verbs API. When you open an RDMA device, libibverbs loads the matching provider automatically — your application sees only the standard `ibv_*` interface regardless of the underlying hardware.
+
+## How providers are loaded
+
+libibverbs searches for provider shared libraries at startup. By default it looks in `/usr/lib/libibverbs/`, but you can override this with the `VERBS_PROVIDER_DIR` environment variable.
+
+Provider libraries follow the naming convention `libXXX-rdmav*.so`, where `XXX` is the provider name (e.g. `libmlx5-rdmav34.so`). The version suffix (`rdmavN`) is a stable ABI tag — it is not the library version.
+
+<Note>
+  Most distributions install providers via packages such as `rdma-core` or `libibverbs-dev`. Installing the package that matches your kernel driver version is usually sufficient.
+</Note>
+
+## Supported kernel drivers
+
+The table below lists every kernel RDMA driver that has a userspace provider in rdma-core.
+
+| Kernel driver | Provider directory | Description |
+|---|---|---|
+| `bnxt_re.ko` | `bnxt_re` | Broadcom NetXtreme-E RoCE |
+| `efa.ko` | `efa` | Amazon Elastic Fabric Adapter |
+| `erdma.ko` | `erdma` | Alibaba Elastic RDMA |
+| `iw_cxgb4.ko` | `cxgb4` | Chelsio iWARP (T4/T5/T6) |
+| `hfi1.ko` | `hfi1verbs` | Intel Omni-Path Architecture |
+| `hns-roce-hw-v2.ko` | `hns` | HiSilicon RoCE (Kunpeng SoC) |
+| `ionic_rdma.ko` | `ionic` | Pensando/AMD DSC RoCE |
+| `irdma.ko` | `irdma` | Intel iWARP/RoCE (Ethernet 800 series) |
+| `ib_qib.ko` | `ipathverbs` | Intel/QLogic InfiniPath (legacy) |
+| `mana_ib.ko` | `mana` | Microsoft Azure MANA RDMA |
+| `mlx4_ib.ko` | `mlx4` | Mellanox ConnectX-3 / ConnectX-3 Pro |
+| `mlx5_ib.ko` | `mlx5` | Mellanox ConnectX-4 and later, BlueField DPUs |
+| `ib_mthca.ko` | `mthca` | Mellanox legacy InfiniBand (Tavor/Arbel/Sinai) |
+| `ocrdma.ko` | `ocrdma` | Emulex/Broadcom OneConnect (legacy) |
+| `qedr.ko` | `qedr` | QLogic FastLinQ 4xxxx RoCE |
+| `rdma_rxe.ko` | `rxe` | Soft-RoCE (software RoCE over Ethernet) |
+| `siw.ko` | `siw` | SoftIWARP (software iWARP over TCP/IP) |
+| `vmw_pvrdma.ko` | `vmw_pvrdma` | VMware paravirtualized RDMA |
+
+## Finding which provider your device uses
+
+Use `ibv_devices` to list detected RDMA devices and their associated drivers:
+
+```bash
+ibv_devices
+```
+
+To see detailed attributes for a specific device, including the driver name:
+
+```bash
+ibv_devinfo -d <device_name>
+```
+
+The `hca_type` or `node_desc` fields in the output identify the hardware, which maps directly to the kernel driver and provider in the table above. You can also inspect `/sys/class/infiniband/<device>/device/driver` to find the kernel driver name.

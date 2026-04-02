@@ -1,0 +1,64 @@
+---
+title: "Introduction"
+description: "rdma-core provides userspace libraries and daemons for the Linux kernel's RDMA subsystem, enabling high-performance, low-latency network communication."
+---
+
+rdma-core is the userspace component of the Linux kernel's `drivers/infiniband` subsystem. It contains the libraries, provider drivers, and daemons needed to use RDMA (Remote Direct Memory Access) hardware and software devices from userspace.
+
+## Device nodes
+
+rdma-core manages userspace access to the following kernel device nodes:
+
+| Device node | Library |
+|---|---|
+| `/dev/infiniband/uverbsX` | libibverbs |
+| `/dev/infiniband/rdma_cm` | librdmacm |
+| `/dev/infiniband/umadX` | libibumad |
+
+## Supported kernel RDMA drivers
+
+The userspace provider components under `providers/` support the following kernel drivers:
+
+- `bnxt_re.ko` — Broadcom NetXtreme-E RoCE
+- `efa.ko` — Amazon Elastic Fabric Adapter
+- `erdma.ko` — Alibaba Elastic RDMA
+- `iw_cxgb4.ko` — Chelsio T4/T5/T6 iWARP
+- `hfi1.ko` — Intel Omni-Path HFI1
+- `hns-roce-hw-v2.ko` — HiSilicon RoCE v2
+- `ionic_rdma.ko` — AMD/Pensando Ionic RDMA
+- `irdma.ko` — Intel Ethernet RDMA
+- `ib_qib.ko` — Intel/QLogic QIB
+- `mana_ib.ko` — Microsoft Azure Network Adapter
+- `mlx4_ib.ko` — Mellanox ConnectX-3
+- `mlx5_ib.ko` — Mellanox ConnectX-4 and newer
+- `ib_mthca.ko` — Mellanox Tavor/Sinai/Arbel
+- `ocrdma.ko` — Emulex OneConnect RDMA
+- `qedr.ko` — QLogic FastLinQ RoCE/iWARP
+- `rdma_rxe.ko` — Soft-RoCE (software RoCE over Ethernet)
+- `siw.ko` — Soft-iWARP (software iWARP over TCP/IP)
+- `vmw_pvrdma.ko` — VMware Paravirtual RDMA
+
+## Service daemons
+
+In addition to the libraries, rdma-core ships three service daemons:
+
+- **srp_daemon** — manages SCSI RDMA Protocol (SRP) targets (`ib_srp.ko`)
+- **iwpmd** — port mapper for iWARP kernel providers
+- **ibacm** — InfiniBand communication management assistant
+
+## Key libraries
+
+<CardGroup cols={2}>
+  <Card title="libibverbs" icon="network-wired" href="/libraries/libibverbs">
+    The core RDMA verbs library. Provides the API for allocating protection domains, registering memory regions, creating queue pairs, and posting work requests.
+  </Card>
+  <Card title="librdmacm" icon="arrows-left-right" href="/libraries/librdmacm">
+    Connection management library for RDMA. Offers a socket-like API for establishing and managing RDMA connections across InfiniBand and RoCE fabrics.
+  </Card>
+  <Card title="libibumad" icon="microchip" href="/libraries/libibumad">
+    Userspace Management Datagram library. Used for sending and receiving InfiniBand management datagrams via the `/dev/infiniband/umadX` device.
+  </Card>
+  <Card title="pyverbs" icon="python" href="/pyverbs/overview">
+    Python bindings for libibverbs, librdmacm, and related libraries. Built with Cython and provides a Pythonic interface for RDMA programming.
+  </Card>
+</CardGroup>

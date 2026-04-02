@@ -1,80 +1,154 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Get up and running with RDMA in minutes using Soft-RoCE (RXE), which requires no special hardware."
 ---
 
-## Get started in three steps
+The fastest way to try rdma-core is with **Soft-RoCE** (`rdma_rxe`), a software RDMA driver that runs over any existing Ethernet interface. No InfiniBand or RoCE hardware is required.
 
-Get your documentation site running locally and make your first customization.
+<Steps>
+  <Step title="Install dependencies">
+    Install the build dependencies for your distribution.
 
-### Step 1: Set up your local environment
+    <Tabs>
+      <Tab title="Debian/Ubuntu">
+        ```bash
+        apt-get install build-essential cmake gcc libudev-dev libnl-3-dev libnl-route-3-dev ninja-build pkg-config valgrind python3-dev cython3 python3-docutils pandoc
+        ```
+      </Tab>
+      <Tab title="Fedora/CentOS 8">
+        ```bash
+        dnf builddep redhat/rdma-core.spec
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+  <Step title="Build rdma-core">
+    Clone the repository and run the quick-start build script. This configures cmake with `IN_PLACE=1` and builds using ninja (or make as a fallback).
 
-### Step 2: Deploy your changes
+    ```bash
+    git clone https://github.com/linux-rdma/rdma-core.git
+    cd rdma-core
+    bash build.sh
+    ```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    After a successful build, programs are in `build/bin/` and shared libraries are in `build/lib/`.
+  </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Step title="Load the RXE driver and create an RDMA device">
+    Load the `rdma_rxe` kernel module, then attach it to an existing network interface. Replace `eth0` with the name of your interface.
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    modprobe rdma_rxe
+    rdma link add rxe_eth0 type rxe netdev eth0
+    ```
 
-### Step 3: Go live
+    <Note>
+      A recent version of `iproute2` is required for the `rdma link` command.
+    </Note>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    If you have a Mellanox HCA on the same machine, unload its kernel module first to avoid conflicts:
 
-## Next steps
+    ```bash
+    modprobe -rv mlx4_ib
+    # or for ConnectX-4 and newer:
+    modprobe -rv mlx5_ib
+    ```
+  </Step>
 
-Now that you have your docs running, explore these key features:
+  <Step title="Verify the device is available">
+    Confirm that your new RXE device appears in the system.
 
-<CardGroup cols={2}>
+    ```bash
+    ibv_devices
+    ```
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+    Or use the `rdma` command:
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+    ```bash
+    rdma link
+    ```
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+    You should see a device named `rxe_eth0` listed and in `ACTIVE` state.
+  </Step>
+</Steps>
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+## Open a device in C
 
-</CardGroup>
+The following example uses `libibverbs` to list available RDMA devices and open the first one.
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+```c open_device.c
+#include <stdio.h>
+#include <infiniband/verbs.h>
+
+int main(void)
+{
+    struct ibv_device **dev_list;
+    struct ibv_context *ctx;
+    int num_devices;
+
+    dev_list = ibv_get_device_list(&num_devices);
+    if (!dev_list) {
+        perror("ibv_get_device_list");
+        return 1;
+    }
+
+    printf("Found %d RDMA device(s)\n", num_devices);
+
+    if (num_devices == 0) {
+        fprintf(stderr, "No RDMA devices found\n");
+        ibv_free_device_list(dev_list);
+        return 1;
+    }
+
+    printf("Opening device: %s\n", ibv_get_device_name(dev_list[0]));
+
+    ctx = ibv_open_device(dev_list[0]);
+    if (!ctx) {
+        perror("ibv_open_device");
+        ibv_free_device_list(dev_list);
+        return 1;
+    }
+
+    printf("Device opened successfully\n");
+
+    ibv_close_device(ctx);
+    ibv_free_device_list(dev_list);
+    return 0;
+}
+```
+
+Compile and run with:
+
+```bash
+gcc open_device.c -o open_device -libverbs
+./open_device
+```
+
+## Open a device in Python (pyverbs)
+
+The same operation using the **pyverbs** Python bindings:
+
+```python open_device.py
+from pyverbs.device import Context, get_device_list
+
+devices = get_device_list()
+if not devices:
+    raise RuntimeError("No RDMA devices found")
+
+print(f"Found {len(devices)} RDMA device(s)")
+
+dev = devices[0]
+print(f"Opening device: {dev.name.decode()}")
+
+ctx = Context(name=dev.name.decode())
+print("Device opened successfully")
+
+attr = ctx.query_device()
+print(f"  Max QPs:  {attr.max_qp}")
+print(f"  Max CQEs: {attr.max_cqe}")
+```
+
+<Tip>
+  pyverbs is built automatically by `build.sh` when Cython and Python development headers are available. The module is located at `build/lib/pyverbs/`.
+</Tip>

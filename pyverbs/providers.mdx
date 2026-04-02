@@ -1,0 +1,219 @@
+---
+title: "Provider extensions"
+description: "mlx5-specific and other provider extensions in pyverbs"
+---
+
+Provider extensions expose hardware-specific capabilities that are not available through the standard verbs interface. The primary provider in pyverbs is `mlx5`, accessed via `pyverbs.providers.mlx5.mlx5dv`.
+
+## Opening an mlx5 context
+
+`Mlx5Context` inherits from `Context` and adds mlx5-specific methods. You must supply an `Mlx5DVContextAttr`; default attribute values work for most use cases.
+
+```python
+import pyverbs.providers.mlx5.mlx5dv as m
+from pyverbs.pd import PD
+
+attr = m.Mlx5DVContextAttr()  # Default values are fine
+ctx = m.Mlx5Context(attr=attr, name='rocep0s8f0')
+# The provider context can be used as a regular Context, e.g.:
+pd = PD(ctx)  # Success
+```
+
+## Querying mlx5 device attributes
+
+`ctx.query_mlx5_device()` returns mlx5-specific attributes not exposed by the standard `ibv_query_device_ex()`.
+
+```python
+import pyverbs.providers.mlx5.mlx5dv as m
+
+ctx = m.Mlx5Context(attr=m.Mlx5DVContextAttr(), name='ibp0s8f0')
+mlx5_attrs = ctx.query_mlx5_device()
+print(mlx5_attrs)
+```
+
+Example output:
+
+```
+Version             : 0
+Flags               : CQE v1, Support CQE 128B compression, Support CQE 128B padding, Support packet based credit mode (in RC QP)
+comp mask           : CQE compression, SW parsing, Striding RQ, Tunnel offloads, Dynamic BF regs, Clock info update, Flow action flags
+CQE compression caps:
+  max num             : 64
+  supported formats   : with hash, with RX checksum CSUM, with stride index
+SW parsing caps:
+  SW parsing offloads :
+  supported QP types  :
+Striding RQ caps:
+  min single stride log num of bytes: 6
+  max single stride log num of bytes: 13
+  min single wqe log num of strides: 9
+  max single wqe log num of strides: 16
+  supported QP types  : Raw Packet
+Tunnel offloads caps:
+Max dynamic BF registers: 1024
+Max clock info update [nsec]: 1099511
+Flow action flags   : 0
+```
+
+## mlx5 QPs
+
+`Mlx5QP` accepts an optional `dv_init_attr` keyword argument of type `Mlx5DVQPInitAttr`. When provided, the QP is created via `mlx5dv_create_qp` instead of `ibv_create_qp_ex`.
+
+The example below creates both a DC QP of type DCI and a Raw Packet QP:
+
+```python
+from pyverbs.providers.mlx5.mlx5dv import Mlx5Context, Mlx5DVContextAttr
+from pyverbs.providers.mlx5.mlx5dv import Mlx5DVQPInitAttr, Mlx5QP
+from pyverbs.providers.mlx5.mlx5_enums import (mlx5dv_qp_init_attr_mask,
+    mlx5dv_dc_type, mlx5dv_qp_create_flags)
+from pyverbs.qp import QPInitAttrEx, QPCap
+from pyverbs.libibverbs_enums import ibv_qp_type, ibv_qp_init_attr_mask
+from pyverbs.cq import CQ
+from pyverbs.pd import PD
+
+with Mlx5Context(name='rocep0s8f0', attr=Mlx5DVContextAttr()) as ctx:
+    with PD(ctx) as pd:
+        with CQ(ctx, 100) as cq:
+            cap = QPCap(100, 0, 1, 0)
+            # Create a DC QP of type DCI
+            qia = QPInitAttrEx(cap=cap, pd=pd, scq=cq, qp_type=ibv_qp_type.IBV_QPT_DRIVER,
+                               comp_mask=ibv_qp_init_attr_mask.IBV_QP_INIT_ATTR_PD, rcq=cq)
+            attr = Mlx5DVQPInitAttr(comp_mask=mlx5dv_qp_init_attr_mask.MLX5DV_QP_INIT_ATTR_MASK_DC)
+            attr.dc_type = mlx5dv_dc_type.MLX5DV_DCTYPE_DCI
+
+            dci = Mlx5QP(ctx, qia, dv_init_attr=attr)
+
+            # Create a Raw Packet QP using mlx5-specific capabilities
+            qia.qp_type = ibv_qp_type.IBV_QPT_RAW_PACKET
+            attr.comp_mask = mlx5dv_qp_init_attr_mask.MLX5DV_QP_INIT_ATTR_MASK_QP_CREATE_FLAGS
+            attr.create_flags = (mlx5dv_qp_create_flags.MLX5DV_QP_CREATE_ALLOW_SCATTER_TO_CQE |
+                                 mlx5dv_qp_create_flags.MLX5DV_QP_CREATE_TIR_ALLOW_SELF_LOOPBACK_UC |
+                                 mlx5dv_qp_create_flags.MLX5DV_QP_CREATE_TUNNEL_OFFLOADS)
+            qp = Mlx5QP(ctx, qia, dv_init_attr=attr)
+```
+
+<Note>
+  Currently, pyverbs supports creation of DCI only. DCT support is not yet implemented.
+</Note>
+
+## mlx5 CQ
+
+`Mlx5CQ` inherits from `CQEX`. Its constructor accepts a third keyword argument, `dv_init_attr`, of type `Mlx5DVCQInitAttr`. When provided, the CQ is created via `mlx5dv_create_cq`.
+
+The example below enables CQE compression with CSUM format:
+
+```python
+from pyverbs.providers.mlx5.mlx5dv import Mlx5Context, Mlx5DVContextAttr
+from pyverbs.providers.mlx5.mlx5dv import Mlx5DVCQInitAttr, Mlx5CQ
+from pyverbs.providers.mlx5.mlx5_enums import (mlx5dv_cq_init_attr_mask,
+    mlx5dv_cqe_comp_res_format)
+from pyverbs.cq import CqInitAttrEx
+
+with Mlx5Context(name='rocep0s8f0', attr=Mlx5DVContextAttr()) as ctx:
+    cqia = CqInitAttrEx()
+    mlx5_cqia = Mlx5DVCQInitAttr(
+        comp_mask=mlx5dv_cq_init_attr_mask.MLX5DV_CQ_INIT_ATTR_MASK_COMPRESSED_CQE,
+        cqe_comp_res_format=mlx5dv_cqe_comp_res_format.MLX5DV_CQE_RES_FORMAT_CSUM)
+    cq = Mlx5CQ(ctx, cqia, dv_init_attr=mlx5_cqia)
+```
+
+## DevX objects
+
+A DevX object (`Mlx5DevxObj`) represents a raw firmware object. You provide the command buffer directly, matching the device specification. On success, the output buffer is stored on the instance and can be used in follow-up firmware commands.
+
+<Note>
+  You must call `.close()` on DevX objects manually when you are done. Do not let them be garbage-collected or destroyed by closing the `Mlx5Context` directly — there is no guarantee of correct destruction order for arbitrary DevX objects. Pyverbs does guarantee that DevX UARs and UMEMs are closed in order and after all other DevX objects.
+</Note>
+
+The example below allocates and frees a PD object over DevX:
+
+```python
+from pyverbs.providers.mlx5.mlx5dv import Mlx5Context, Mlx5DVContextAttr, Mlx5DevxObj
+import pyverbs.providers.mlx5.mlx5_enums as dve
+import struct
+
+attr = Mlx5DVContextAttr(dve.MLX5DV_CONTEXT_FLAGS_DEVX)
+ctx = Mlx5Context(attr, 'rocep8s0f0')
+MLX5_CMD_OP_ALLOC_PD = 0x800
+MLX5_CMD_OP_ALLOC_PD_OUTLEN = 0x10
+cmd_in = struct.pack('!H14s', MLX5_CMD_OP_ALLOC_PD, bytes(0))
+pd = Mlx5DevxObj(ctx, cmd_in, MLX5_CMD_OP_ALLOC_PD_OUTLEN)
+pd.close()
+```
+
+## mlx5 VAR
+
+A Virtual Address Region (VAR) provides a per-context address range that can be memory-mapped for direct hardware access.
+
+```python
+from pyverbs.providers.mlx5.mlx5dv import Mlx5VAR
+from pyverbs.device import Context
+import mmap
+
+ctx = Context(name='rocep0s8f0')
+var = Mlx5VAR(ctx)
+var_map = mmap.mmap(fileno=ctx.cmd_fd, length=var.length, offset=var.mmap_off)
+# There is no munmap method in the mmap module; closing the instance unmaps it.
+var_map.close()
+var.close()
+```
+
+## mlx5 PP (Packet Pacing)
+
+A Packet Pacing (PP) entry configures a rate-limited flow on Send Queues via the DevX interface. The device must be opened with the `MLX5DV_CONTEXT_FLAGS_DEVX` flag.
+
+```python
+from pyverbs.providers.mlx5.mlx5dv import Mlx5Context, Mlx5DVContextAttr, Mlx5PP
+from pyverbs.providers.mlx5.mlx5_enums import mlx5dv_context_attr_flags
+
+# The device must be opened as DEVX context
+mlx5dv_attr = Mlx5DVContextAttr(mlx5dv_context_attr_flags.MLX5DV_CONTEXT_FLAGS_DEVX)
+ctx = Mlx5Context(attr=mlx5dv_attr, name='rocep0s8f0')
+rate_limit_inbox = (5).to_bytes(length=4, byteorder='big', signed=True)
+pp = Mlx5PP(ctx, rate_limit_inbox)
+pp.close()
+```
+
+## mlx5 UAR
+
+A User Access Region (UAR) is a PCI address space window mapped for direct CPU-to-HCA access. It is required for some DevX commands.
+
+```python
+from pyverbs.providers.mlx5.mlx5dv import Mlx5UAR
+from pyverbs.device import Context
+
+ctx = Context(name='rocep0s8f0')
+uar = Mlx5UAR(ctx)
+uar.close()
+```
+
+## CMID (rdma_cm integration)
+
+`CMID` represents an `rdma_cm_id` and provides a synchronous connection management path via `rdma_create_ep`. The example below establishes a connection between a passive (server) and active (client) side.
+
+```python
+from pyverbs.qp import QPInitAttr, QPCap
+from pyverbs.cmid import CMID, AddrInfo
+from pyverbs.librdmacm_enums import rdma_port_space, RAI_PASSIVE
+
+cap = QPCap(max_recv_wr=1)
+qp_init_attr = QPInitAttr(cap=cap)
+addr = '11.137.14.124'
+port = '7471'
+
+# Passive side
+sai = AddrInfo(src=addr, src_service=port, port_space=rdma_port_space.RDMA_PS_TCP, flags=RAI_PASSIVE)
+sid = CMID(creator=sai, qp_init_attr=qp_init_attr)
+sid.listen()          # listen for incoming connection requests
+new_id = sid.get_request()  # check for connection requests
+new_id.accept()       # new_id is connected to remote peer and ready to communicate
+
+# Active side
+cai = AddrInfo(src=addr, dst=addr, dst_service=port, port_space=rdma_port_space.RDMA_PS_TCP)
+cid = CMID(creator=cai, qp_init_attr=qp_init_attr)
+cid.connect()         # send connection request to passive addr
+```
+
+<Note>
+  Only synchronous control path (`rdma_create_ep`) is currently supported. For asynchronous connection management examples, see `tests/test_rdmacm`.
+</Note>

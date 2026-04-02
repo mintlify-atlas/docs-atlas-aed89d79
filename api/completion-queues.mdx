@@ -1,0 +1,357 @@
+---
+title: "Completion queues"
+description: "Creating and polling completion queues"
+---
+
+A Completion Queue (CQ) holds work completion entries generated when send or receive work requests finish. Applications either poll the CQ directly with `ibv_poll_cq`, or use a Completion Channel to receive an event notification from the kernel when new completions arrive.
+
+```c
+#include <infiniband/verbs.h>
+```
+
+---
+
+## Work completion status codes
+
+Each `struct ibv_wc` returned by `ibv_poll_cq` carries a `status` field of type `enum ibv_wc_status`:
+
+| Status | Description |
+|---|---|
+| `IBV_WC_SUCCESS` | Work request completed successfully. |
+| `IBV_WC_LOC_LEN_ERR` | Local length error — the posted buffer was too small. |
+| `IBV_WC_LOC_QP_OP_ERR` | Local QP operation error. |
+| `IBV_WC_LOC_EEC_OP_ERR` | Local end-to-end context operation error. |
+| `IBV_WC_LOC_PROT_ERR` | Local protection error — invalid lkey or access violation. |
+| `IBV_WC_WR_FLUSH_ERR` | Work request flushed because the QP moved to error state. |
+| `IBV_WC_MW_BIND_ERR` | Memory window bind error. |
+| `IBV_WC_BAD_RESP_ERR` | Bad response from remote peer. |
+| `IBV_WC_LOC_ACCESS_ERR` | Local access error on a receive. |
+| `IBV_WC_REM_INV_REQ_ERR` | Remote invalid request error. |
+| `IBV_WC_REM_ACCESS_ERR` | Remote access error — invalid rkey or access violation at peer. |
+| `IBV_WC_REM_OP_ERR` | Remote operation error. |
+| `IBV_WC_RETRY_EXC_ERR` | Retry counter exceeded — peer is unreachable. |
+| `IBV_WC_RNR_RETRY_EXC_ERR` | RNR (receiver not ready) retry counter exceeded. |
+| `IBV_WC_FATAL_ERR` | Fatal error — QP is unusable. |
+| `IBV_WC_RESP_TIMEOUT_ERR` | Response timeout error. |
+| `IBV_WC_GENERAL_ERR` | General, unclassified error. |
+
+Use `ibv_wc_status_str(wc.status)` to convert a status code to a human-readable string.
+
+---
+
+## Work completion opcodes
+
+The `opcode` field of `struct ibv_wc` indicates what operation completed. Receive-side completions have bit 7 set (`IBV_WC_RECV = 1 << 7`), so you can test `wc.opcode & IBV_WC_RECV` to distinguish receives from sends.
+
+| Opcode | Side | Description |
+|---|---|---|
+| `IBV_WC_SEND` | Send | `IBV_WR_SEND` or `IBV_WR_SEND_WITH_IMM` completed. |
+| `IBV_WC_RDMA_WRITE` | Send | RDMA Write completed. |
+| `IBV_WC_RDMA_READ` | Send | RDMA Read completed and data is in the local buffer. |
+| `IBV_WC_COMP_SWAP` | Send | Compare-and-Swap atomic completed. |
+| `IBV_WC_FETCH_ADD` | Send | Fetch-and-Add atomic completed. |
+| `IBV_WC_BIND_MW` | Send | Memory window bind completed. |
+| `IBV_WC_LOCAL_INV` | Send | Local invalidate completed. |
+| `IBV_WC_RECV` | Recv | Receive completed (message placed in the posted buffer). |
+| `IBV_WC_RECV_RDMA_WITH_IMM` | Recv | RDMA Write with immediate data received. |
+
+---
+
+## ibv_create_comp_channel
+
+Creates a completion event channel — a file descriptor that the kernel writes to when a completion notification is triggered by `ibv_req_notify_cq`.
+
+**Signature:**
+
+```c
+struct ibv_comp_channel *ibv_create_comp_channel(struct ibv_context *context);
+```
+
+**Parameters:**
+
+<ParamField path="context" type="struct ibv_context *">
+  An open device context.
+</ParamField>
+
+**Returns:** A pointer to `struct ibv_comp_channel` on success, or `NULL` on failure. The channel wraps a file descriptor (`channel->fd`) that is compatible with `poll(2)`, `select(2)`, and `epoll(7)`.
+
+---
+
+## ibv_create_cq
+
+Creates a Completion Queue.
+
+**Signature:**
+
+```c
+struct ibv_cq *ibv_create_cq(struct ibv_context *context,
+                              int cqe,
+                              void *cq_context,
+                              struct ibv_comp_channel *channel,
+                              int comp_vector);
+```
+
+**Parameters:**
+
+<ParamField path="context" type="struct ibv_context *">
+  An open device context.
+</ParamField>
+
+<ParamField path="cqe" type="int">
+  Minimum number of completion entries the CQ must be able to hold. The actual size allocated may be larger; check `cq->cqe` after creation.
+</ParamField>
+
+<ParamField path="cq_context" type="void *">
+  An opaque user pointer stored in the CQ and returned by `ibv_get_cq_event`. Pass `NULL` if not needed.
+</ParamField>
+
+<ParamField path="channel" type="struct ibv_comp_channel *">
+  A completion channel for event-driven notification, or `NULL` to disable completion events (polling-only mode).
+</ParamField>
+
+<ParamField path="comp_vector" type="int">
+  Completion vector used to distribute interrupt affinity across CPU cores. Must be `>= 0` and `< context->num_comp_vectors`. Pass `0` when in doubt.
+</ParamField>
+
+**Returns:** A pointer to `struct ibv_cq` on success, or `NULL` on failure.
+
+**Errors:** `ibv_destroy_cq` fails with `EBUSY` if any QP is still associated with the CQ. Destroy all QPs before destroying their CQs.
+
+---
+
+## ibv_create_cq_ex
+
+Extended variant that can request additional per-completion fields (hardware timestamps, CVLAN tag, flow tag) via `wc_flags`.
+
+**Signature:**
+
+```c
+struct ibv_cq_ex *ibv_create_cq_ex(struct ibv_context *context,
+                                    struct ibv_cq_init_attr_ex *cq_attr);
+```
+
+**Parameters:**
+
+<ParamField path="context" type="struct ibv_context *">
+  An open device context.
+</ParamField>
+
+<ParamField path="cq_attr" type="struct ibv_cq_init_attr_ex *">
+  Extended attributes. Key fields:
+  - `cqe` — minimum number of completion entries
+  - `cq_context` — user context pointer
+  - `channel` / `comp_vector` — same as `ibv_create_cq`
+  - `wc_flags` — bitwise OR of `enum ibv_create_cq_wc_flags` to request extra completion fields such as `IBV_WC_EX_WITH_COMPLETION_TIMESTAMP`
+  - `comp_mask` — must be set to mark which fields are valid
+</ParamField>
+
+**Returns:** A `struct ibv_cq_ex *`, which embeds a `struct ibv_cq` as its first member, or `NULL` on failure.
+
+<Note>
+  Use the iterator API (`ibv_start_poll`, `ibv_next_poll`, `ibv_end_poll`, `ibv_wc_read_*`) to consume completions from an extended CQ. Casting `ibv_cq_ex *` to `ibv_cq *` is safe and required when passing to functions that expect a regular CQ.
+</Note>
+
+---
+
+## ibv_destroy_cq
+
+Destroys a Completion Queue.
+
+**Signature:**
+
+```c
+int ibv_destroy_cq(struct ibv_cq *cq);
+```
+
+**Parameters:**
+
+<ParamField path="cq" type="struct ibv_cq *">
+  The CQ to destroy.
+</ParamField>
+
+**Returns:** `0` on success, or a positive `errno` value on failure.
+
+---
+
+## ibv_poll_cq
+
+Polls for completed work requests. This is the primary hot-path function in busy-polling applications.
+
+**Signature:**
+
+```c
+int ibv_poll_cq(struct ibv_cq *cq, int num_entries, struct ibv_wc *wc);
+```
+
+**Parameters:**
+
+<ParamField path="cq" type="struct ibv_cq *">
+  The CQ to poll.
+</ParamField>
+
+<ParamField path="num_entries" type="int">
+  Maximum number of completions to dequeue in this call. `wc` must point to an array of at least this many `struct ibv_wc` elements.
+</ParamField>
+
+<ParamField path="wc" type="struct ibv_wc *">
+  Output array. On return, the first N elements are filled with completion data. Each entry contains:
+  - `wr_id` — the `wr_id` from the originating work request
+  - `status` — completion status (`IBV_WC_SUCCESS` or an error code)
+  - `opcode` — the type of operation that completed
+  - `byte_len` — bytes transferred (receive completions)
+  - `qp_num` / `src_qp` — QP numbers (UD completions)
+  - `imm_data` — immediate data (if `IBV_WC_WITH_IMM` is set in `wc_flags`)
+</ParamField>
+
+**Returns:** A non-negative count of completions dequeued (0 means the CQ was empty), or a negative value on error.
+
+<Tip>
+  In a polling loop, continue calling `ibv_poll_cq` until it returns 0 to drain the CQ fully before sleeping or yielding.
+</Tip>
+
+---
+
+## ibv_req_notify_cq
+
+Arms the CQ to generate a single completion event on the associated completion channel when the next completion arrives.
+
+**Signature:**
+
+```c
+int ibv_req_notify_cq(struct ibv_cq *cq, int solicited_only);
+```
+
+**Parameters:**
+
+<ParamField path="cq" type="struct ibv_cq *">
+  The CQ to arm.
+</ParamField>
+
+<ParamField path="solicited_only" type="int">
+  If non-zero, an event is generated only for completions that were posted with the `IBV_SEND_SOLICITED` flag. If zero, any completion generates an event.
+</ParamField>
+
+**Returns:** `0` on success, a non-zero value on failure.
+
+<Warning>
+  After calling `ibv_get_cq_event`, you must re-arm the CQ with `ibv_req_notify_cq` before new events will be delivered. Arm the CQ *before* polling to avoid a race where a completion arrives between the last poll and the arm.
+</Warning>
+
+---
+
+## ibv_get_cq_event
+
+Blocks until a completion event is delivered on a completion channel.
+
+**Signature:**
+
+```c
+int ibv_get_cq_event(struct ibv_comp_channel *channel,
+                     struct ibv_cq **cq,
+                     void **cq_context);
+```
+
+**Parameters:**
+
+<ParamField path="channel" type="struct ibv_comp_channel *">
+  The completion channel to wait on.
+</ParamField>
+
+<ParamField path="cq" type="struct ibv_cq **">
+  Set on return to the CQ that generated the event.
+</ParamField>
+
+<ParamField path="cq_context" type="void **">
+  Set on return to the user context pointer that was passed to `ibv_create_cq`.
+</ParamField>
+
+**Returns:** `0` on success, `-1` on failure.
+
+---
+
+## ibv_ack_cq_events
+
+Acknowledges completion events returned by `ibv_get_cq_event`. Every event must be acknowledged before `ibv_destroy_cq` can complete.
+
+**Signature:**
+
+```c
+void ibv_ack_cq_events(struct ibv_cq *cq, unsigned int nevents);
+```
+
+**Parameters:**
+
+<ParamField path="cq" type="struct ibv_cq *">
+  The CQ for which to acknowledge events.
+</ParamField>
+
+<ParamField path="nevents" type="unsigned int">
+  Number of events to acknowledge. Applications may batch acknowledgements: accumulate multiple events and acknowledge them in a single call.
+</ParamField>
+
+**Returns:** Nothing.
+
+---
+
+## Example: CQ with completion channel and polling
+
+```c
+#include <infiniband/verbs.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+void completion_loop(struct ibv_context *ctx, struct ibv_qp *qp)
+{
+    /* Create completion channel for event notification */
+    struct ibv_comp_channel *ch = ibv_create_comp_channel(ctx);
+    if (!ch) { perror("ibv_create_comp_channel"); return; }
+
+    /* Create CQ with at least 256 entries, attached to the channel */
+    struct ibv_cq *cq = ibv_create_cq(ctx, 256, NULL, ch, 0);
+    if (!cq) { perror("ibv_create_cq"); return; }
+
+    /* Arm the CQ before starting to send/recv */
+    if (ibv_req_notify_cq(cq, 0)) {
+        perror("ibv_req_notify_cq"); return;
+    }
+
+    /* ... post send/recv work requests to qp ... */
+
+    for (;;) {
+        /* Wait for a completion event */
+        struct ibv_cq *ev_cq;
+        void *ev_ctx;
+        if (ibv_get_cq_event(ch, &ev_cq, &ev_ctx)) {
+            perror("ibv_get_cq_event"); break;
+        }
+        ibv_ack_cq_events(ev_cq, 1);
+
+        /* Re-arm before draining to avoid missing completions */
+        if (ibv_req_notify_cq(cq, 0)) {
+            perror("ibv_req_notify_cq"); break;
+        }
+
+        /* Drain all available completions */
+        struct ibv_wc wc[16];
+        int n;
+        while ((n = ibv_poll_cq(cq, 16, wc)) > 0) {
+            for (int i = 0; i < n; i++) {
+                if (wc[i].status != IBV_WC_SUCCESS) {
+                    fprintf(stderr, "CQ error: %s (wr_id=%llu)\n",
+                            ibv_wc_status_str(wc[i].status),
+                            (unsigned long long)wc[i].wr_id);
+                    continue;
+                }
+                /* Handle successful completion */
+                if (wc[i].opcode & IBV_WC_RECV)
+                    printf("Received %u bytes\n", wc[i].byte_len);
+                else
+                    printf("Send complete\n");
+            }
+        }
+    }
+
+    ibv_destroy_cq(cq);
+    ibv_destroy_comp_channel(ch);
+}
+```

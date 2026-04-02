@@ -1,0 +1,186 @@
+---
+title: "Testing"
+description: "Running and writing tests for rdma-core using pyverbs"
+---
+
+rdma-core provides an infrastructure for quickly adding feature-specific tests built on top of pyverbs, the Python bindings for the RDMA verbs API.
+
+## Test design
+
+### Resource classes
+
+Tests are organized around resource aggregator classes that hold the RDMA objects needed for a given test scenario.
+
+| Class | Contents |
+|---|---|
+| `BaseResources` | Context, Protection Domain (PD) |
+| `TrafficResources` | Everything in `BaseResources` plus MR, CQ, and QP — enough for loopback traffic testing |
+| `RCResources` | Extends `TrafficResources` with RC-specific constants; exposes a helper to move the QP to RTS |
+| `UDResources` | Extends `TrafficResources`; overrides `create_mr` to add GRH header size to the message size |
+| `XRXResources` | Extends `TrafficResources` with XRX-specific constants |
+
+Each subclass exposes creation methods that can be overridden by test-specific subclasses.
+
+### RDMATestCase
+
+`RDMATestCase` inherits from Python's `unittest.TestCase` and adds automatic device, port, and GID selection:
+
+- **No device specified:** Iterates over all available devices. For each port of each device it identifies valid GID indexes (in RoCE, only IPv4 and IPv6 GIDs are used). All valid `<device, port, GID>` triples are collected and one is selected at random.
+- **Device specified:** The same process runs for all ports of that specific device.
+
+### Traffic utilities
+
+`tests/utils.py` provides wrappers for common traffic operations. Each utility accepts a resource aggregation object as its first parameter and relies on that object having valid RDMA resources.
+
+| Function | Description |
+|---|---|
+| `get_send_wr()` | Creates a `SendWR` with a single SGE; sets MR content to `'c'` (client) or `'s'` (server) |
+| `get_recv_wr()` | Creates a `RecvWR` with a single SGE |
+| `post_send()` | Posts a single send request to the QP; adds an address vector for UD QPs |
+| `post_recv()` | Posts a given `RecvWR` N times, useful for pre-filling the RQ or during traffic |
+| `poll_cq()` | Polls N completions from the CQ; raises an exception on non-success status |
+| `validate()` | Verifies MR data matches the expected pattern (`'c'` on server, `'s'` on client) |
+| `traffic()` | Runs N iterations of send/recv between two resource objects |
+
+## Running tests
+
+<Tabs>
+  <Tab title="Developer">
+    Build the project first, then run the test runner directly from the build output:
+
+    ```sh
+    ./build.sh
+    ./build/bin/run_tests.py
+    ```
+  </Tab>
+  <Tab title="User (installed)">
+    After installing rdma-core, tests are located under `/usr/share/doc/`:
+
+    ```sh
+    python /usr/share/doc/rdma-core-<version>/tests/run_tests.py
+    ```
+  </Tab>
+</Tabs>
+
+### Output format
+
+```
+$ ./build/bin/run_tests.py
+..........................................ss...............
+----------------------------------------------------------------------
+Ran 59 tests in 13.268s
+
+OK (skipped=2)
+```
+
+Each character in the output line represents a single test:
+
+| Character | Meaning |
+|---|---|
+| `.` | Test passed |
+| `s` | Test skipped |
+| `E` | Test failed (error) |
+
+### Verbose mode
+
+Pass `-v` to see the full test name and skip reasons:
+
+```sh
+$ python3 /usr/share/doc/rdma-core-26.0/tests/run_tests.py -v
+test_create_ah (test_addr.AHTest) ... ok
+test_create_ah_roce (test_addr.AHTest) ... ok
+test_destroy_ah (test_addr.AHTest) ... ok
+test_odp_rc_traffic (test_odp.OdpTestCase) ... skipped 'No port is up, can't run traffic'
+```
+
+### Filtered runs
+
+Use `-k` to run only a subset of tests. The following example runs all tests from files starting with `test_device`:
+
+```sh
+$ build/bin/run_tests.py -v -k test_device
+test_create_dm (tests.test_device.DMTest) ... ok
+test_dev_list (tests.test_device.DeviceTest) ... ok
+test_open_dev (tests.test_device.DeviceTest) ... ok
+test_query_device (tests.test_device.DeviceTest) ... ok
+test_query_port (tests.test_device.DeviceTest) ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 0.152s
+
+OK
+```
+
+### GPUDirect RDMA tests
+
+A subset of tests covers GPUDirect RDMA, running traffic over CUDA-allocated memory.
+
+**Requirements:**
+- A supported NVIDIA GPU
+- CUDA 11.7 or later with "Open flavor" driver (`-m kernel-open`), driver version 515 or later
+- `cuda-python` 12.0 or later
+
+```sh
+$ build/bin/run_tests.py -v --gpu 0 -k cuda
+test_cuda_dmabuf_rdma_write_traffic (tests.test_cuda_dmabuf.DmabufCudaTest) ... ok
+test_mlx_devx_cuda_send_imm_traffic (tests.test_mlx5_cuda_umem.Mlx5GpuDevxRcTrafficTest) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 3.033s
+
+OK
+```
+
+Use `--gpu <index>` to select a specific GPU when multiple are present.
+
+## Writing a new test
+
+The following example is based on `tests/test_odp.py`, a simple test that runs ping-pong over several traffic types. ODP requires a capability check before registering a memory region, so a decorator is used to skip the test if the capability is not available.
+
+<Steps>
+  <Step title="Create a resource class">
+    Inherit from `RCResources` (for RC traffic) or `UDResources` (for UD traffic):
+
+    ```python
+    class OdpResources(RCResources):
+        def __init__(self, dev_name, ib_port, gid_index):
+            super().__init__(dev_name, ib_port, gid_index)
+    ```
+  </Step>
+  <Step title="Override methods as needed">
+    Override creation methods like `create_mr()` to customize resource setup. Apply a decorator to skip the test if a required capability is absent:
+
+    ```python
+    @requires_odp('rc')
+    def create_mr(self):
+        self.mr = MR(
+            self.pd,
+            self.msg_size,
+            e.IBV_ACCESS_ON_DEMAND | e.IBV_ACCESS_LOCAL_WRITE
+        )
+    ```
+  </Step>
+  <Step title="Create a test case class">
+    Inherit from `RDMATestCase` to get automatic device/port/GID selection:
+
+    ```python
+    class OdpTestCase(RDMATestCase):
+        def setUp(self):
+            super().setUp()
+    ```
+  </Step>
+  <Step title="Add test methods">
+    Add one or more methods whose names start with `test_`. Create the resource objects inside each test method and call the traffic utility:
+
+    ```python
+    def test_odp_rc_traffic(self):
+        client = OdpResources(self.dev_name, self.ib_port, self.gid_index)
+        server = OdpResources(self.dev_name, self.ib_port, self.gid_index)
+        traffic(client, server, self.iters, self.gid_index, self.ib_port)
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The `tests/__init__.py` file defines a `_load_tests` function that automatically discovers all `test_*` methods in classes inheriting from `unittest.TestCase` or `RDMATestCase` located in files under the `tests/` directory whose names start with `test_`. No manual registration is needed.
+</Note>

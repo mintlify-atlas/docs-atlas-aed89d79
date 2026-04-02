@@ -1,0 +1,140 @@
+---
+title: "Building from source"
+description: "Instructions for building rdma-core from source on Debian, Fedora, openSUSE, CentOS, and Amazon Linux."
+---
+
+rdma-core uses a cmake-based build system and supports a wide range of Linux distributions.
+
+## Prerequisites
+
+Install the required packages for your distribution before building.
+
+<Tabs>
+  <Tab title="Debian/Ubuntu">
+    Supported releases: Debian 9 (stretch) or newer, Ubuntu 16.04 LTS or newer.
+
+    ```bash
+    apt-get install build-essential cmake gcc libudev-dev libnl-3-dev libnl-route-3-dev ninja-build pkg-config valgrind python3-dev cython3 python3-docutils pandoc
+    ```
+  </Tab>
+  <Tab title="Fedora/CentOS 8">
+    ```bash
+    dnf builddep redhat/rdma-core.spec
+    ```
+
+    <Note>Fedora uses the name `ninja-build` for the `ninja` command.</Note>
+  </Tab>
+  <Tab title="openSUSE">
+    ```bash
+    zypper install cmake gcc libnl3-devel libudev-devel ninja pkg-config valgrind-devel python3-devel python3-Cython python3-docutils pandoc
+    ```
+  </Tab>
+  <Tab title="CentOS 7/Amazon Linux 2">
+    Install the base packages:
+
+    ```bash
+    yum install cmake gcc libnl3-devel libudev-devel make pkgconfig valgrind-devel
+    ```
+
+    Then install more modern tooling from EPEL for the best experience.
+
+    <CodeGroup>
+
+    ```bash CentOS 7
+    yum install epel-release
+    yum install cmake3 ninja-build pandoc
+    ```
+
+    ```bash Amazon Linux 2
+    amazon-linux-extras install epel
+    yum install cmake3 ninja-build pandoc
+    ```
+
+    </CodeGroup>
+
+    <Note>
+      EPEL uses the name `ninja-build` for the `ninja` command and `cmake3` for the `cmake` command.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Build commands
+
+### Quick start
+
+The `build.sh` script handles cmake configuration and invokes the appropriate build tool automatically:
+
+```bash
+bash build.sh
+```
+
+This is equivalent to:
+
+```bash
+mkdir build
+cd build
+cmake -DIN_PLACE=1 -GNinja ..
+ninja
+```
+
+### Manual cmake build
+
+If you want more control over the configuration:
+
+```bash
+mkdir build
+cd build
+cmake -GNinja ..
+ninja
+```
+
+To pass additional cmake flags, set the `EXTRA_CMAKE_FLAGS` environment variable when using `build.sh`:
+
+```bash
+EXTRA_CMAKE_FLAGS="-DENABLE_STATIC=1 -DNO_MAN_PAGES=1" bash build.sh
+```
+
+## Build outputs
+
+| Path | Contents |
+|---|---|
+| `build/bin/` | Sample programs and utilities (e.g., `ibv_devices`, `ibv_devinfo`) |
+| `build/lib/` | Shared libraries (e.g., `libibverbs.so`, `librdmacm.so`) |
+
+<Note>
+  The default `IN_PLACE=1` build is configured to run programs directly from the `build/` directory and cannot be installed system-wide. Omit `-DIN_PLACE=1` for a standard installable build.
+</Note>
+
+## CMake configuration options
+
+Pass these options to `cmake` using `-D<OPTION>=<VALUE>`.
+
+| Option | Default | Description |
+|---|---|---|
+| `IN_PLACE` | `0` | Configure the build to run from the build directory. The result is not installable. Set by `build.sh` automatically. |
+| `ENABLE_VALGRIND` | `ON` | Enable Valgrind memory annotations. Disable for a small positive performance impact. |
+| `ENABLE_RESOLVE_NEIGH` | `ON` | Link to libnl and resolve Ethernet neighbours internally. Disabling also skips building iwpmd. |
+| `ENABLE_STATIC` | `OFF` | Produce static libraries (`.a`) alongside the shared libraries. |
+| `NO_PYVERBS` | `OFF` | Skip building the pyverbs Python bindings. Set to `1` if Cython or Python headers are unavailable. |
+| `NO_MAN_PAGES` | `OFF` | Skip building and installing man pages. Useful when pandoc or rst2man is not available. |
+| `IOCTL_MODE` | `both` | Kernel ABI mode. `both` tries ioctl first and falls back to the legacy write path. Use `write` to force the legacy path, or `ioctl` to disable the fallback. |
+| `TRACING` | `None` | Enable tracing support. Accepts `LTTNG` (Linux Trace Toolkit), `USDT` (Userspace Statically Defined Tracepoints), or `None`. |
+| `CMAKE_BUILD_TYPE` | — | Optimization level. Use `Debug` to disable optimization, `RelWithDebInfo` for release with debug symbols, or `Release` for packaging. |
+
+### Example: build with static libraries and no man pages
+
+```bash
+mkdir build
+cd build
+cmake -GNinja -DENABLE_STATIC=1 -DNO_MAN_PAGES=1 ..
+ninja
+```
+
+### Example: build without pyverbs
+
+```bash
+mkdir build
+cd build
+cmake -GNinja -DNO_PYVERBS=1 ..
+ninja
+```

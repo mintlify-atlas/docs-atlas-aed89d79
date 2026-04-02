@@ -1,0 +1,228 @@
+---
+title: "Other hardware providers"
+description: "Provider support for EFA, irdma, hns, qedr, and other RDMA adapters"
+---
+
+This page covers all rdma-core providers outside of the Mellanox mlx4/mlx5 family and the software RDMA drivers. Each provider pairs with a specific kernel module.
+
+## Checking which driver your device uses
+
+Before loading a kernel module, identify which driver your hardware needs:
+
+```bash
+# List all detected RDMA devices
+ibv_devices
+
+# Show detailed info including driver name
+ibv_devinfo -d <device_name>
+
+# Check the kernel driver via sysfs
+ls -l /sys/class/infiniband/<device>/device/driver
+```
+
+The symlink target under `driver/` shows the kernel module name, which maps directly to a provider in the table in the [provider overview](/providers/overview).
+
+---
+
+## Cloud and datacenter adapters
+
+<CardGroup cols={2}>
+  <Card title="Amazon EFA (efa)" icon="cloud">
+    **Kernel module:** `efa.ko`
+
+    The Elastic Fabric Adapter is Amazon's custom RDMA NIC for HPC and ML workloads on AWS EC2. EFA uses a scalable reliable datagram (SRD) transport optimized for all-to-all traffic patterns. The provider exposes an extended API (`efadv_*` in `efadv.h`) for SRD QP creation and device capability queries.
+  </Card>
+  <Card title="Microsoft MANA (mana)" icon="cloud">
+    **Kernel module:** `mana_ib.ko`
+
+    The Microsoft Azure Network Adapter RDMA provider supports RDMA on Azure instances with MANA NICs. It exposes standard verbs for use with MPI and RDMA-capable applications running in Azure VMs.
+  </Card>
+  <Card title="Alibaba ERDMA (erdma)" icon="cloud">
+    **Kernel module:** `erdma.ko`
+
+    Elastic RDMA provides RDMA capabilities on Alibaba Cloud ECS instances. The `erdma` provider implements standard verbs over the ERDMA hardware.
+  </Card>
+</CardGroup>
+
+---
+
+## Intel adapters
+
+<CardGroup cols={2}>
+  <Card title="Intel irdma" icon="microchip">
+    **Kernel module:** `irdma.ko`
+
+    The `irdma` provider supports both iWARP and RoCEv2 on Intel Ethernet 800 series adapters (E810 and later). It replaces the older `i40iw` driver for iWARP on previous Intel Ethernet generations.
+
+    ```bash
+    modprobe irdma
+    ibv_devinfo
+    ```
+  </Card>
+  <Card title="Intel Omni-Path HFI1 (hfi1verbs)" icon="microchip">
+    **Kernel module:** `hfi1.ko`
+
+    The `hfi1verbs` provider supports Intel Omni-Path Architecture (OPA) HFI1 host fabric interfaces. Omni-Path uses a native fabric protocol optimized for HPC workloads and provides very low latency at high message rates.
+
+    ```bash
+    modprobe hfi1
+    ibv_devinfo
+    ```
+  </Card>
+</CardGroup>
+
+---
+
+## Chelsio
+
+**Provider:** `cxgb4` | **Kernel module:** `iw_cxgb4.ko`
+
+The `cxgb4` provider implements iWARP (RDMA over TCP/IP) on Chelsio T4, T5, and T6 adapters. iWARP runs over standard TCP/IP, so no special network configuration is required beyond a working IP network between endpoints.
+
+```bash
+modprobe iw_cxgb4
+ibv_devinfo
+```
+
+<Note>
+  iWARP providers (cxgb4, irdma) rely on the `iwpmd` daemon for port mapper services. Start `iwpmd` before running iWARP applications.
+</Note>
+
+---
+
+## HiSilicon
+
+**Provider:** `hns` | **Kernel module:** `hns-roce-hw-v2.ko`
+
+The `hns` provider implements RoCE on HiSilicon Kunpeng SoC platforms. These are ARM-based server SoCs with an integrated RoCE engine commonly found in Huawei/HiSilicon servers.
+
+```bash
+modprobe hns-roce-hw-v2
+ibv_devinfo
+```
+
+---
+
+## Broadcom
+
+**Provider:** `bnxt_re` | **Kernel module:** `bnxt_re.ko`
+
+The `bnxt_re` provider supports RoCEv2 on Broadcom NetXtreme-E series adapters. These are datacenter NICs that combine Ethernet and RoCE functionality in a single adapter.
+
+```bash
+modprobe bnxt_re
+ibv_devinfo
+```
+
+---
+
+## Pensando / AMD
+
+**Provider:** `ionic` | **Kernel module:** `ionic_rdma.ko`
+
+The `ionic` provider supports RoCE on Pensando DSC (Distributed Services Card) adapters, now part of AMD. DSC adapters are programmable NICs with hardware offload capabilities for storage, networking, and security.
+
+```bash
+modprobe ionic_rdma
+ibv_devinfo
+```
+
+---
+
+## QLogic
+
+<Tabs>
+  <Tab title="qedr (FastLinQ)">
+    **Kernel module:** `qedr.ko`
+
+    The `qedr` provider supports RoCEv2 on QLogic FastLinQ 4xxxx series adapters. These are converged network adapters supporting both Ethernet and RDMA.
+
+    ```bash
+    modprobe qedr
+    ibv_devinfo
+    ```
+  </Tab>
+  <Tab title="ipathverbs (legacy)">
+    **Kernel module:** `ib_qib.ko`
+
+    The `ipathverbs` provider supports legacy Intel/QLogic InfiniPath adapters (IB QIB). InfiniPath was an early InfiniBand implementation used in HPC clusters. This provider is considered legacy; new deployments should use more modern hardware.
+
+    ```bash
+    modprobe ib_qib
+    ibv_devinfo
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Legacy and specialized providers
+
+<AccordionGroup>
+  <Accordion title="VMware PVRDMA (vmw_pvrdma)">
+    **Kernel module:** `vmw_pvrdma.ko`
+
+    The VMware paravirtualized RDMA provider enables RDMA inside VMware vSphere virtual machines when the host has RDMA hardware and vSphere RDMA passthrough is configured. It presents a standard verbs interface to the guest VM.
+
+    ```bash
+    modprobe vmw_pvrdma
+    ibv_devinfo
+    ```
+  </Accordion>
+  <Accordion title="Emulex ocrdma (legacy)">
+    **Kernel module:** `ocrdma.ko`
+
+    The `ocrdma` provider supports Emulex OneConnect RDMA adapters, now part of Broadcom. These adapters are no longer actively developed; this provider is maintained for existing deployments.
+
+    ```bash
+    modprobe ocrdma
+    ibv_devinfo
+    ```
+  </Accordion>
+  <Accordion title="Mellanox mthca (legacy)">
+    **Kernel module:** `ib_mthca.ko`
+
+    The `mthca` provider supports legacy Mellanox InfiniBand adapters: Tavor (MT23108), Arbel (MT25208), and Sinai (MT25204). These are first- and second-generation Mellanox IB adapters from the mid-2000s. Use `mlx4` or `mlx5` for any current Mellanox hardware.
+
+    ```bash
+    modprobe ib_mthca
+    ibv_devinfo
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Common setup pattern
+
+All hardware providers follow the same basic setup sequence:
+
+<Steps>
+  <Step title="Load the kernel module">
+    ```bash
+    modprobe <kernel_module>
+    ```
+
+    Replace `<kernel_module>` with the module name from the table in the [provider overview](/providers/overview).
+  </Step>
+
+  <Step title="Verify the device appears">
+    ```bash
+    ibv_devices
+    ```
+
+    The device should appear in the list. If it does not, check `dmesg` for driver errors.
+  </Step>
+
+  <Step title="Inspect device capabilities">
+    ```bash
+    ibv_devinfo -d <device_name>
+    ```
+
+    This shows port state, active link layer, maximum QP counts, maximum message size, and other capabilities.
+  </Step>
+</Steps>
+
+<Tip>
+  For iWARP providers (`cxgb4`, `irdma`), also start the `iwpmd` service before running applications. iWARP relies on this daemon for port reservation and address binding.
+</Tip>

@@ -1,28 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "rdma-core",
+  "projectType": "sdk-library",
+  "projectName": "rdma-core",
+  "projectDescription": "Userspace libraries and daemons for the Linux RDMA subsystem, providing C and Python APIs for InfiniBand, iWARP, and RoCE hardware.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#08a8e7",
-    "light": "#cf9b0b",
-    "dark": "#fc5124"
-  },
-  "favicon": "https://media.brand.dev/90848f9d-e6e9-473e-937d-7d4663895dfb.png",
-  "logo": {
-    "light": "https://media.brand.dev/bd43edb4-ecd6-4892-9153-4dc8d1ffd593.png",
-    "dark": "https://media.brand.dev/bd43edb4-ecd6-4892-9153-4dc8d1ffd593.png"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/linux-rdma/rdma-core"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/linux-rdma/rdma-core"
-    }
-  },
+  "primaryColor": "#08a8e7",
+  "lightColor": "#cf9b0b",
+  "darkColor": "#fc5124",
   "navigation": {
     "tabs": [
       {
@@ -106,5 +89,38 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Userspace verbs interface (libibverbs) for direct RDMA hardware access",
+    "Connection management library (librdmacm) for RDMA connections",
+    "Python bindings (pyverbs) for scripting and testing",
+    "Hardware provider plugins for 18+ RDMA/InfiniBand NICs",
+    "Software RDMA emulation via Soft-RoCE (RXE) and SoftIWARP (SIW)",
+    "InfiniBand diagnostic tools (infiniband-diags)",
+    "Communication manager daemon (ibacm) for address and route resolution",
+    "SRP daemon for InfiniBand SCSI RDMA Protocol targets",
+    "iWARP port mapper daemon (iwpmd)"
+  ],
+  "publicApiSurface": [
+    "ibv_open_device()",
+    "ibv_alloc_pd()",
+    "ibv_reg_mr()",
+    "ibv_create_qp()",
+    "ibv_create_cq()",
+    "ibv_post_send()",
+    "ibv_post_recv()",
+    "ibv_poll_cq()",
+    "ibv_create_ah()",
+    "rdma_create_id()",
+    "rdma_bind_addr()",
+    "rdma_connect()",
+    "rdma_listen()",
+    "rdma_accept()",
+    "pyverbs.device.Context",
+    "pyverbs.pd.PD",
+    "pyverbs.mr.MR",
+    "pyverbs.qp.QP",
+    "pyverbs.cq.CQ",
+    "pyverbs.cmid.CMID"
+  ]
 }

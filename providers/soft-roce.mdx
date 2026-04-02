@@ -1,0 +1,101 @@
+---
+title: "Soft-RoCE and SoftIWARP"
+description: "Software RDMA emulation over standard Ethernet"
+---
+
+Soft-RoCE (RXE) and SoftIWARP (SIW) implement RDMA in software on top of standard network hardware. They let you develop and test RDMA applications without dedicated RDMA adapters.
+
+## Soft-RoCE (RXE)
+
+The `rdma_rxe` kernel module implements RoCE v2 (RDMA over Converged Ethernet) entirely in software. It attaches to any existing Ethernet interface and presents an InfiniBand device to userspace. The userspace provider lives in `providers/rxe/`.
+
+**Use cases:**
+- Developing and testing RDMA applications without RDMA hardware
+- CI environments and virtual machines
+- Learning the RDMA programming model
+
+## SoftIWARP (SIW)
+
+The `siw` kernel module implements iWARP (RDMA over TCP/IP) in software. Unlike RXE, which requires Ethernet, SIW works over any TCP/IP-capable interface including loopback. The userspace provider lives in `providers/siw/`.
+
+**Use cases:**
+- Testing iWARP-specific application behavior
+- Environments where only TCP/IP connectivity is available
+- Loopback testing on a single host
+
+<Warning>
+  Neither Soft-RoCE nor SoftIWARP is suitable for production workloads. Because RDMA operations go through the kernel network stack in software, latency and throughput are significantly worse than hardware RDMA. CPU overhead is also substantially higher. Use these drivers for development and testing only.
+</Warning>
+
+## Setting up Soft-RoCE
+
+<Steps>
+  <Step title="Load the kernel module">
+    ```bash
+    modprobe rdma_rxe
+    ```
+  </Step>
+
+  <Step title="Create an RXE device over an Ethernet interface">
+    Replace `eth0` with the name of your Ethernet interface. The device name (`rxe_eth0`) can be anything you choose.
+
+    ```bash
+    rdma link add rxe_eth0 type rxe netdev eth0
+    ```
+
+    A recent version of `iproute2` is required for the `rdma` command.
+  </Step>
+
+  <Step title="Verify the device is active">
+    ```bash
+    rdma link
+    ibv_devices
+    ```
+
+    You should see an entry for `rxe_eth0` (or whatever name you chose) in the output of both commands.
+  </Step>
+</Steps>
+
+<Warning>
+  If you have a Mellanox HCA installed, the `mlx4_ib` or `mlx5_ib` kernel module may conflict with Soft-RoCE on the same machine. Unload those modules before using RXE:
+
+  ```bash
+  modprobe -rv mlx4_ib
+  modprobe -rv mlx5_ib
+  ```
+</Warning>
+
+## Setting up SoftIWARP
+
+<Steps>
+  <Step title="Load the kernel module">
+    ```bash
+    modprobe siw
+    ```
+  </Step>
+
+  <Step title="Create a SIW device over a network interface">
+    ```bash
+    rdma link add siw0 type siw netdev eth0
+    ```
+
+    You can also attach SIW to the loopback interface (`lo`) for single-host testing.
+  </Step>
+
+  <Step title="Verify the device is active">
+    ```bash
+    rdma link
+    ibv_devices
+    ```
+  </Step>
+</Steps>
+
+## Performance limitations
+
+Software RDMA emulation routes all data through the kernel network stack. Compared to hardware RDMA you should expect:
+
+- **Higher latency**: microseconds to tens of microseconds, versus sub-microsecond for hardware
+- **Higher CPU usage**: every RDMA operation consumes CPU cycles for protocol processing
+- **Lower throughput**: limited by CPU and network stack throughput, not line rate
+
+These characteristics make both drivers appropriate for functional testing and development, but not for performance benchmarking or production deployment.

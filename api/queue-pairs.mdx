@@ -1,0 +1,404 @@
+---
+title: "Queue pairs"
+description: "Creating and managing Queue Pairs for RDMA operations"
+---
+
+A Queue Pair (QP) is the fundamental communication endpoint in the RDMA verbs model. Each QP contains a Send Queue (SQ) and a Receive Queue (RQ). Work requests posted to the SQ generate outbound operations; incoming messages are delivered to the RQ. QPs must be moved through a state machine before they can transfer data.
+
+```c
+#include <infiniband/verbs.h>
+```
+
+---
+
+## QP types
+
+<ParamField path="enum ibv_qp_type" type="">
+  | Value | Numeric | Description |
+  |---|---|---|
+  | `IBV_QPT_RC` | 2 | Reliable Connected — one-to-one, reliable, ordered. Supports RDMA Read/Write and atomics. |
+  | `IBV_QPT_UC` | 3 | Unreliable Connected — one-to-one, no ACKs. Supports RDMA Write only. |
+  | `IBV_QPT_UD` | 4 | Unreliable Datagram — one-to-many, requires an address handle per destination. Max payload is one MTU. |
+  | `IBV_QPT_RAW_PACKET` | 8 | Raw Ethernet packet injection/reception. Requires special privileges. |
+  | `IBV_QPT_XRC_SEND` | 9 | Extended Reliable Connected sender-side. |
+  | `IBV_QPT_XRC_RECV` | 10 | Extended Reliable Connected receiver-side. |
+  | `IBV_QPT_DRIVER` | 0xff | Vendor-specific QP type; semantics are provider-defined. |
+</ParamField>
+
+---
+
+## QP state machine
+
+A newly created QP starts in the `RESET` state and must be transitioned through `INIT` → `RTR` (Ready To Receive) → `RTS` (Ready To Send) before data can flow. Use `ibv_modify_qp` for each transition.
+
+```
+IBV_QPS_RESET
+    │  ibv_modify_qp (IBV_QP_STATE | IBV_QP_PORT | ...)
+    ▼
+IBV_QPS_INIT
+    │  ibv_modify_qp (IBV_QP_STATE | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | ...)
+    ▼
+IBV_QPS_RTR        ← can now receive
+    │  ibv_modify_qp (IBV_QP_STATE | IBV_QP_SQ_PSN | ...)
+    ▼
+IBV_QPS_RTS        ← can now send and receive
+```
+
+Error states `IBV_QPS_SQD`, `IBV_QPS_SQE`, and `IBV_QPS_ERR` indicate degraded or failed conditions.
+
+---
+
+## ibv_create_qp
+
+Creates a Queue Pair associated with a protection domain.
+
+**Signature:**
+
+```c
+struct ibv_qp *ibv_create_qp(struct ibv_pd *pd,
+                              struct ibv_qp_init_attr *qp_init_attr);
+```
+
+**Parameters:**
+
+<ParamField path="pd" type="struct ibv_pd *">
+  The protection domain to associate with the QP.
+</ParamField>
+
+<ParamField path="qp_init_attr" type="struct ibv_qp_init_attr *">
+  Initialization attributes. The structure is updated on return with the actual allocated capacities (which are always ≥ the requested values).
+
+  ```c
+  struct ibv_qp_init_attr {
+      void            *qp_context;    /* user-defined context pointer */
+      struct ibv_cq   *send_cq;       /* CQ for send completions */
+      struct ibv_cq   *recv_cq;       /* CQ for receive completions */
+      struct ibv_srq  *srq;           /* shared receive queue, or NULL */
+      struct ibv_qp_cap cap;          /* capacity parameters */
+      enum ibv_qp_type  qp_type;      /* QP transport type */
+      int               sq_sig_all;   /* 1 = signal every send WR */
+  };
+
+  struct ibv_qp_cap {
+      uint32_t max_send_wr;      /* max outstanding send WRs */
+      uint32_t max_recv_wr;      /* max outstanding recv WRs */
+      uint32_t max_send_sge;     /* max SGEs per send WR */
+      uint32_t max_recv_sge;     /* max SGEs per recv WR */
+      uint32_t max_inline_data;  /* max inline data bytes */
+  };
+  ```
+</ParamField>
+
+**Returns:** A pointer to `struct ibv_qp` on success, or `NULL` on failure (with `errno` set). Inspect `qp->qp_num` for the assigned QP number that must be exchanged with the remote peer.
+
+<Note>
+  `ibv_create_qp` will fail if asked to create an RC or UC QP associated with an SRQ; only UD and XRC QPs may use SRQs via this interface. Use `ibv_create_qp_ex` for full SRQ type support.
+</Note>
+
+---
+
+## ibv_create_qp_ex
+
+Extended variant that accepts additional options such as an XRC domain, receive work queue indirection table, or RSS hash configuration.
+
+**Signature:**
+
+```c
+struct ibv_qp *ibv_create_qp_ex(struct ibv_context *context,
+                                 struct ibv_qp_init_attr_ex *qp_init_attr_ex);
+```
+
+**Parameters:**
+
+<ParamField path="context" type="struct ibv_context *">
+  An open device context.
+</ParamField>
+
+<ParamField path="qp_init_attr_ex" type="struct ibv_qp_init_attr_ex *">
+  Extended attributes. Includes all fields from `ibv_qp_init_attr` plus:
+  - `comp_mask` — bitmask selecting which extended fields are valid
+  - `pd` — protection domain (required when `IBV_QP_INIT_ATTR_PD` is set)
+  - `xrcd` — XRC domain (required for XRC QPs)
+  - `create_flags` — additional creation flags (e.g. `IBV_QP_CREATE_SCATTER_FCS`)
+  - `rwq_ind_tbl` — receive work queue indirection table for RSS
+  - `send_ops_flags` — enable specific send operations via the new send API
+</ParamField>
+
+**Returns:** A `struct ibv_qp *` on success, or `NULL` on failure.
+
+---
+
+## ibv_destroy_qp
+
+Destroys a Queue Pair and releases all associated kernel resources.
+
+**Signature:**
+
+```c
+int ibv_destroy_qp(struct ibv_qp *qp);
+```
+
+**Parameters:**
+
+<ParamField path="qp" type="struct ibv_qp *">
+  The QP to destroy.
+</ParamField>
+
+**Returns:** `0` on success, or a positive `errno` value on failure.
+
+**Errors:** Returns `EBUSY` if the QP is still attached to a multicast group. Detach with `ibv_detach_mcast` first.
+
+---
+
+## ibv_modify_qp
+
+Modifies one or more attributes of a QP, including performing state transitions.
+
+**Signature:**
+
+```c
+int ibv_modify_qp(struct ibv_qp *qp,
+                  struct ibv_qp_attr *attr,
+                  int attr_mask);
+```
+
+**Parameters:**
+
+<ParamField path="qp" type="struct ibv_qp *">
+  The QP to modify.
+</ParamField>
+
+<ParamField path="attr" type="struct ibv_qp_attr *">
+  Structure containing the new attribute values. Only fields corresponding to set bits in `attr_mask` are applied. Key fields:
+  - `qp_state` — the target state
+  - `dest_qp_num` — remote QP number (required for RTR transition of RC/UC)
+  - `ah_attr` — address handle attributes (path to peer, required for RTR)
+  - `path_mtu` — maximum transfer unit for the path
+  - `rq_psn` / `sq_psn` — initial packet sequence numbers
+  - `max_rd_atomic` / `max_dest_rd_atomic` — outstanding RDMA Read limits
+</ParamField>
+
+<ParamField path="attr_mask" type="int">
+  Bitwise OR of `enum ibv_qp_attr_mask` values selecting which fields in `attr` to apply. For example: `IBV_QP_STATE | IBV_QP_PORT | IBV_QP_PKEY_INDEX | IBV_QP_ACCESS_FLAGS`.
+</ParamField>
+
+**Returns:** `0` on success, or a positive `errno` value on failure.
+
+---
+
+## ibv_query_qp
+
+Queries the current attributes of a QP.
+
+**Signature:**
+
+```c
+int ibv_query_qp(struct ibv_qp *qp,
+                 struct ibv_qp_attr *attr,
+                 int attr_mask,
+                 struct ibv_qp_init_attr *init_attr);
+```
+
+**Parameters:**
+
+<ParamField path="qp" type="struct ibv_qp *">
+  The QP to query.
+</ParamField>
+
+<ParamField path="attr" type="struct ibv_qp_attr *">
+  Output structure filled with current QP attribute values for the selected mask.
+</ParamField>
+
+<ParamField path="attr_mask" type="int">
+  Bitwise OR of `enum ibv_qp_attr_mask` values selecting which attributes to retrieve.
+</ParamField>
+
+<ParamField path="init_attr" type="struct ibv_qp_init_attr *">
+  Output structure filled with the QP's original creation parameters.
+</ParamField>
+
+**Returns:** `0` on success, or a positive `errno` value on failure.
+
+---
+
+## ibv_post_send
+
+Posts a linked list of send work requests to a QP's Send Queue.
+
+**Signature:**
+
+```c
+int ibv_post_send(struct ibv_qp *qp,
+                  struct ibv_send_wr *wr,
+                  struct ibv_send_wr **bad_wr);
+```
+
+**Parameters:**
+
+<ParamField path="qp" type="struct ibv_qp *">
+  The QP whose Send Queue receives the work requests.
+</ParamField>
+
+<ParamField path="wr" type="struct ibv_send_wr *">
+  Pointer to the first work request in a null-terminated linked list (via `wr->next`). Key fields:
+  - `wr_id` — user-defined identifier echoed in the completion
+  - `sg_list` / `num_sge` — scatter/gather elements
+  - `opcode` — operation type (`IBV_WR_SEND`, `IBV_WR_RDMA_WRITE`, `IBV_WR_RDMA_READ`, etc.)
+  - `send_flags` — `IBV_SEND_SIGNALED`, `IBV_SEND_INLINE`, `IBV_SEND_FENCE`, etc.
+  - `wr.rdma.remote_addr` / `wr.rdma.rkey` — for RDMA operations
+  - `wr.ud.ah` / `wr.ud.remote_qpn` / `wr.ud.remote_qkey` — for UD sends
+</ParamField>
+
+<ParamField path="bad_wr" type="struct ibv_send_wr **">
+  On failure, set to point to the first work request that could not be posted.
+</ParamField>
+
+**Returns:** `0` on success, or a positive `errno` value on failure.
+
+---
+
+## ibv_post_recv
+
+Posts a linked list of receive work requests to a QP's Receive Queue.
+
+**Signature:**
+
+```c
+int ibv_post_recv(struct ibv_qp *qp,
+                  struct ibv_recv_wr *wr,
+                  struct ibv_recv_wr **bad_wr);
+```
+
+**Parameters:**
+
+<ParamField path="qp" type="struct ibv_qp *">
+  The QP whose Receive Queue receives the work requests.
+</ParamField>
+
+<ParamField path="wr" type="struct ibv_recv_wr *">
+  Pointer to the first receive work request in a null-terminated linked list. Fields:
+  - `wr_id` — user-defined identifier echoed in the completion
+  - `sg_list` / `num_sge` — scatter/gather elements describing where to place incoming data
+</ParamField>
+
+<ParamField path="bad_wr" type="struct ibv_recv_wr **">
+  On failure, set to point to the first work request that could not be posted.
+</ParamField>
+
+**Returns:** `0` on success, or a positive `errno` value on failure.
+
+---
+
+## ibv_create_srq
+
+Creates a Shared Receive Queue that can be associated with multiple QPs, reducing the per-QP receive buffer overhead.
+
+**Signature:**
+
+```c
+struct ibv_srq *ibv_create_srq(struct ibv_pd *pd,
+                                struct ibv_srq_init_attr *srq_init_attr);
+```
+
+**Parameters:**
+
+<ParamField path="pd" type="struct ibv_pd *">
+  The protection domain for the SRQ.
+</ParamField>
+
+<ParamField path="srq_init_attr" type="struct ibv_srq_init_attr *">
+  Initial attributes. Set `attr.max_wr` (maximum receive WRs) and `attr.max_sge` (scatter/gather elements per WR). The structure is updated on return with actual allocated values, which are always ≥ the requested values.
+</ParamField>
+
+**Returns:** A `struct ibv_srq *` on success, or `NULL` on failure.
+
+---
+
+## RC QP full lifecycle example
+
+```c
+#include <infiniband/verbs.h>
+#include <string.h>
+#include <stdio.h>
+
+/* Assume ctx, pd, send_cq, recv_cq are already set up */
+int create_and_connect_rc_qp(struct ibv_context *ctx,
+                              struct ibv_pd *pd,
+                              struct ibv_cq *send_cq,
+                              struct ibv_cq *recv_cq,
+                              uint32_t remote_qp_num,
+                              uint16_t remote_lid,
+                              uint8_t port_num)
+{
+    /* 1. Create QP in RESET state */
+    struct ibv_qp_init_attr init_attr = {
+        .send_cq       = send_cq,
+        .recv_cq       = recv_cq,
+        .qp_type       = IBV_QPT_RC,
+        .sq_sig_all    = 0,
+        .cap = {
+            .max_send_wr  = 128,
+            .max_recv_wr  = 128,
+            .max_send_sge = 1,
+            .max_recv_sge = 1,
+        },
+    };
+    struct ibv_qp *qp = ibv_create_qp(pd, &init_attr);
+    if (!qp) { perror("ibv_create_qp"); return 1; }
+
+    /* 2. RESET → INIT */
+    struct ibv_qp_attr attr = {
+        .qp_state        = IBV_QPS_INIT,
+        .pkey_index      = 0,
+        .port_num        = port_num,
+        .qp_access_flags = IBV_ACCESS_REMOTE_READ |
+                           IBV_ACCESS_REMOTE_WRITE,
+    };
+    if (ibv_modify_qp(qp, &attr,
+                      IBV_QP_STATE | IBV_QP_PKEY_INDEX |
+                      IBV_QP_PORT  | IBV_QP_ACCESS_FLAGS)) {
+        perror("RESET->INIT"); return 1;
+    }
+
+    /* 3. INIT → RTR */
+    memset(&attr, 0, sizeof(attr));
+    attr.qp_state              = IBV_QPS_RTR;
+    attr.path_mtu              = IBV_MTU_4096;
+    attr.dest_qp_num           = remote_qp_num;
+    attr.rq_psn                = 0;
+    attr.max_dest_rd_atomic    = 1;
+    attr.min_rnr_timer         = 12;
+    attr.ah_attr.dlid          = remote_lid;
+    attr.ah_attr.sl            = 0;
+    attr.ah_attr.src_path_bits = 0;
+    attr.ah_attr.port_num      = port_num;
+    if (ibv_modify_qp(qp, &attr,
+                      IBV_QP_STATE          | IBV_QP_AV          |
+                      IBV_QP_PATH_MTU       | IBV_QP_DEST_QPN    |
+                      IBV_QP_RQ_PSN         | IBV_QP_MAX_DEST_RD_ATOMIC |
+                      IBV_QP_MIN_RNR_TIMER)) {
+        perror("INIT->RTR"); return 1;
+    }
+
+    /* 4. RTR → RTS */
+    memset(&attr, 0, sizeof(attr));
+    attr.qp_state      = IBV_QPS_RTS;
+    attr.sq_psn        = 0;
+    attr.timeout       = 14;
+    attr.retry_cnt     = 7;
+    attr.rnr_retry     = 7;
+    attr.max_rd_atomic = 1;
+    if (ibv_modify_qp(qp, &attr,
+                      IBV_QP_STATE     | IBV_QP_SQ_PSN    |
+                      IBV_QP_TIMEOUT   | IBV_QP_RETRY_CNT |
+                      IBV_QP_RNR_RETRY | IBV_QP_MAX_QP_RD_ATOMIC)) {
+        perror("RTR->RTS"); return 1;
+    }
+
+    printf("QP %u is Ready To Send\n", qp->qp_num);
+
+    /* 5. Teardown */
+    ibv_destroy_qp(qp);
+    return 0;
+}
+```

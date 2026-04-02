@@ -1,0 +1,297 @@
+---
+title: "Address handles"
+description: "Creating address handles for UD and multicast communication"
+---
+
+An Address Handle (AH) encodes the network path to a single remote endpoint. AHs are required for every send operation on a Unreliable Datagram (UD) QP, where the destination is specified per work request rather than at connection time. They are also used when replying to received UD messages, and for multicast group membership.
+
+```c
+#include <infiniband/verbs.h>
+```
+
+---
+
+## Address handle attributes
+
+`ibv_create_ah` takes a `struct ibv_ah_attr` that describes the routing path:
+
+```c
+struct ibv_ah_attr {
+    struct ibv_global_route grh;       /* Global Routing Header (for RoCE / global routing) */
+    uint16_t                dlid;      /* Destination LID (InfiniBand only) */
+    uint8_t                 sl;        /* Service Level (traffic class / priority) */
+    uint8_t                 src_path_bits; /* Source path bits (LMC subpath selection) */
+    uint8_t                 static_rate;   /* ibv_rate enum — max static rate, or 0 */
+    uint8_t                 is_global;    /* 1 = GRH fields are valid (global routing) */
+    uint8_t                 port_num;     /* Local physical port to use */
+};
+```
+
+When `is_global` is set to `1`, the `grh` field must also be populated:
+
+```c
+struct ibv_global_route {
+    union ibv_gid dgid;        /* Destination GID or multicast GID (MGID) */
+    uint32_t      flow_label;  /* IPv6 flow label (0 for InfiniBand) */
+    uint8_t       sgid_index;  /* Index of the source GID in the local GID table */
+    uint8_t       hop_limit;   /* IPv6 hop limit (TTL equivalent) */
+    uint8_t       traffic_class; /* IPv6 traffic class (DSCP) */
+};
+```
+
+<Note>
+  If the port has the `IBV_QPF_GRH_REQUIRED` flag set (query with `ibv_query_port`), the AH **must** be created with `is_global = 1` and a valid `grh` — for example, on RoCE ports where all routing is done via IPv6 GIDs.
+</Note>
+
+---
+
+## ibv_create_ah
+
+Creates an Address Handle associated with a protection domain.
+
+**Signature:**
+
+```c
+struct ibv_ah *ibv_create_ah(struct ibv_pd *pd,
+                              struct ibv_ah_attr *ah_attr);
+```
+
+**Parameters:**
+
+<ParamField path="pd" type="struct ibv_pd *">
+  The protection domain to associate with the AH. The AH can only be used with QPs from the same PD.
+</ParamField>
+
+<ParamField path="ah_attr" type="struct ibv_ah_attr *">
+  Routing attributes for the destination. Set `port_num` to the local port, `dlid` for InfiniBand destinations, and `is_global` + `grh` for RoCE or global InfiniBand routing.
+</ParamField>
+
+**Returns:** A pointer to `struct ibv_ah` on success, or `NULL` on failure (with `errno` set).
+
+**Example (InfiniBand):**
+
+```c
+struct ibv_ah_attr ah_attr = {
+    .dlid          = remote_lid,
+    .sl            = 0,
+    .src_path_bits = 0,
+    .port_num      = 1,
+    .is_global     = 0,
+};
+struct ibv_ah *ah = ibv_create_ah(pd, &ah_attr);
+if (!ah) { perror("ibv_create_ah"); return 1; }
+```
+
+---
+
+## ibv_destroy_ah
+
+Destroys an Address Handle.
+
+**Signature:**
+
+```c
+int ibv_destroy_ah(struct ibv_ah *ah);
+```
+
+**Parameters:**
+
+<ParamField path="ah" type="struct ibv_ah *">
+  The AH to destroy.
+</ParamField>
+
+**Returns:** `0` on success, or a positive `errno` value on failure.
+
+---
+
+## ibv_create_ah_from_wc
+
+Creates an AH suitable for replying to a received UD message by reading the routing information from the work completion and the received Global Route Header (GRH).
+
+**Signature:**
+
+```c
+struct ibv_ah *ibv_create_ah_from_wc(struct ibv_pd *pd,
+                                      struct ibv_wc *wc,
+                                      struct ibv_grh *grh,
+                                      uint8_t port_num);
+```
+
+**Parameters:**
+
+<ParamField path="pd" type="struct ibv_pd *">
+  The protection domain for the new AH.
+</ParamField>
+
+<ParamField path="wc" type="struct ibv_wc *">
+  The work completion from the received message. Used to extract the source LID and other routing fields.
+</ParamField>
+
+<ParamField path="grh" type="struct ibv_grh *">
+  Pointer to the GRH prepended to the received payload (if the `IBV_WC_GRH` flag is set in `wc->wc_flags`). Ignored when the GRH flag is not set.
+</ParamField>
+
+<ParamField path="port_num" type="uint8_t">
+  The local port number on which the message was received.
+</ParamField>
+
+**Returns:** A `struct ibv_ah *` ready to use as the reply destination, or `NULL` on failure.
+
+**Example:**
+
+```c
+struct ibv_wc wc;
+int n = ibv_poll_cq(recv_cq, 1, &wc);
+if (n == 1 && wc.status == IBV_WC_SUCCESS &&
+    (wc.opcode & IBV_WC_RECV)) {
+    /* grh_buf points to the start of the received buffer */
+    struct ibv_grh *grh = (wc.wc_flags & IBV_WC_GRH)
+                          ? (struct ibv_grh *)grh_buf : NULL;
+    struct ibv_ah *reply_ah =
+        ibv_create_ah_from_wc(pd, &wc, grh, port_num);
+    /* Use reply_ah in a UD send WR to reply */
+}
+```
+
+---
+
+## Multicast
+
+UD QPs can join multicast groups to receive packets addressed to a multicast GID and LID. After joining, all messages sent to that multicast address arrive on every attached QP.
+
+### ibv_attach_mcast
+
+Attaches a UD QP to a multicast group.
+
+**Signature:**
+
+```c
+int ibv_attach_mcast(struct ibv_qp *qp,
+                     const union ibv_gid *gid,
+                     uint16_t lid);
+```
+
+**Parameters:**
+
+<ParamField path="qp" type="struct ibv_qp *">
+  A UD QP to attach to the group.
+</ParamField>
+
+<ParamField path="gid" type="const union ibv_gid *">
+  Multicast GID (MGID) of the group. For InfiniBand, MGIDs follow the IB specification. For RoCE, this is an IPv6 multicast address.
+</ParamField>
+
+<ParamField path="lid" type="uint16_t">
+  Multicast LID in host byte order. For RoCE, pass `0`.
+</ParamField>
+
+**Returns:** `0` on success, or a positive `errno` value on failure.
+
+<Note>
+  Subnet administration must have pre-configured the multicast group and the port must be a member before `ibv_attach_mcast` will succeed on a real InfiniBand fabric.
+</Note>
+
+### ibv_detach_mcast
+
+Detaches a UD QP from a multicast group.
+
+**Signature:**
+
+```c
+int ibv_detach_mcast(struct ibv_qp *qp,
+                     const union ibv_gid *gid,
+                     uint16_t lid);
+```
+
+**Parameters:**
+
+<ParamField path="qp" type="struct ibv_qp *">
+  The UD QP to detach.
+</ParamField>
+
+<ParamField path="gid" type="const union ibv_gid *">
+  Multicast GID of the group.
+</ParamField>
+
+<ParamField path="lid" type="uint16_t">
+  Multicast LID in host byte order (or `0` for RoCE).
+</ParamField>
+
+**Returns:** `0` on success, or a positive `errno` value on failure.
+
+<Warning>
+  A QP that is still attached to a multicast group cannot be destroyed. Call `ibv_detach_mcast` for every group the QP belongs to before calling `ibv_destroy_qp`.
+</Warning>
+
+---
+
+## Example: creating an AH for RoCE (global routing)
+
+On RoCE, all routing uses GIDs (IPv6 addresses). The AH must set `is_global = 1` and populate the `grh` sub-structure.
+
+```c
+#include <infiniband/verbs.h>
+#include <arpa/inet.h>
+#include <string.h>
+#include <stdio.h>
+
+struct ibv_ah *create_roce_ah(struct ibv_pd *pd,
+                               uint8_t port_num,
+                               int sgid_index,
+                               const char *dst_gid_str)
+{
+    struct ibv_ah_attr ah_attr;
+    memset(&ah_attr, 0, sizeof(ah_attr));
+
+    ah_attr.is_global  = 1;          /* GRH required for RoCE */
+    ah_attr.port_num   = port_num;
+    ah_attr.sl         = 0;
+
+    /* Parse destination GID from human-readable IPv6 string */
+    if (inet_pton(AF_INET6, dst_gid_str,
+                  ah_attr.grh.dgid.raw) != 1) {
+        fprintf(stderr, "Invalid GID: %s\n", dst_gid_str);
+        return NULL;
+    }
+
+    ah_attr.grh.sgid_index    = sgid_index; /* local GID index */
+    ah_attr.grh.hop_limit     = 64;
+    ah_attr.grh.traffic_class = 0;
+    ah_attr.grh.flow_label    = 0;
+
+    struct ibv_ah *ah = ibv_create_ah(pd, &ah_attr);
+    if (!ah)
+        perror("ibv_create_ah");
+    return ah;
+}
+
+/* Usage in a UD send work request */
+void send_ud_message(struct ibv_qp *qp, struct ibv_mr *mr,
+                     struct ibv_ah *ah,
+                     uint32_t remote_qpn, uint32_t remote_qkey,
+                     void *buf, size_t len)
+{
+    struct ibv_sge sge = {
+        .addr   = (uint64_t)buf,
+        .length = (uint32_t)len,
+        .lkey   = mr->lkey,
+    };
+
+    struct ibv_send_wr wr = {
+        .wr_id      = 42,
+        .sg_list    = &sge,
+        .num_sge    = 1,
+        .opcode     = IBV_WR_SEND,
+        .send_flags = IBV_SEND_SIGNALED,
+        .wr.ud = {
+            .ah          = ah,
+            .remote_qpn  = remote_qpn,
+            .remote_qkey = remote_qkey,
+        },
+    };
+
+    struct ibv_send_wr *bad_wr;
+    if (ibv_post_send(qp, &wr, &bad_wr))
+        perror("ibv_post_send");
+}
+```
